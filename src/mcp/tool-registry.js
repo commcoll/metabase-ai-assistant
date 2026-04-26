@@ -201,7 +201,6 @@ const TOOL_METADATA = {
   },
   mb_dashboard_template_executive: { title: 'Create Executive Dashboard', write: true, destructive: false, idempotent: false },
   mb_dashboard_add_card: { title: 'Add Card to Dashboard', write: true, destructive: false, idempotent: false },
-  mb_dashboard_add_card_sql: { title: 'Add Cards via SQL', write: true, destructive: false, idempotent: false },
   mb_dashboard_update_layout: { title: 'Update Dashboard Layout', write: true, destructive: false, idempotent: true },
   mb_dashboard_get: {
     title: 'Get Dashboard', outputSchema: {
@@ -832,37 +831,6 @@ export function getToolDefinitions() {
         },
         required: ['dashboard_id', 'question_id'],
       },
-    },
-    {
-      name: 'mb_dashboard_add_card_sql',
-      description: 'Add multiple cards to a dashboard using direct SQL inserts. Bypasses API limits, ensures precise positioning, and prevents timeouts. Use this for complex layouts.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          dashboard_id: {
-            type: 'number',
-            description: 'Target Dashboard ID'
-          },
-          cards: {
-            type: 'array',
-            description: 'List of cards to add with layout config',
-            items: {
-              type: 'object',
-              properties: {
-                card_id: { type: 'number' },
-                row: { type: 'number', description: 'Grid row (0-based)' },
-                col: { type: 'number', description: 'Grid col (0-based)' },
-                size_x: { type: 'number', default: 4 },
-                size_y: { type: 'number', default: 4 },
-                visualization_settings: { type: 'object', description: 'Optional override settings' },
-                parameter_mappings: { type: 'array', description: 'Optional filter mappings' }
-              },
-              required: ['card_id', 'row', 'col']
-            }
-          }
-        },
-        required: ['dashboard_id', 'cards']
-      }
     },
     {
       name: 'mb_dashboard_update_layout',

@@ -270,7 +270,6 @@ class MetabaseMCPServer {
       case 'mb_auto_describe': return await this.cardsHandler.handleAutoDescribe(args);
 
       // ── Direct SQL Dashboard ──
-      case 'mb_dashboard_add_card_sql': return await this.dashboardDirectHandler.handleAddCardSql(args);
       case 'mb_dashboard_update_layout': return await this.dashboardDirectHandler.handleUpdateLayoutSql(args);
       case 'mb_create_parametric_question': return await this.dashboardDirectHandler.handleCreateParametricQuestionSql(args);
       case 'mb_link_dashboard_filter': return await this.dashboardDirectHandler.handleLinkDashboardFilter(args);

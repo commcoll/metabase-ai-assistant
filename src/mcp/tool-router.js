@@ -18,7 +18,7 @@ const WRITE_TOOLS = new Set([
     'mb_question_create', 'mb_question_create_parametric', 'mb_card_update', 'mb_card_delete', 'mb_card_archive',
     // Dashboard mutations
     'mb_dashboard_create', 'mb_dashboard_update', 'mb_dashboard_delete',
-    'mb_dashboard_add_card', 'mb_dashboard_add_card_sql', 'mb_dashboard_update_layout',
+    'mb_dashboard_add_card', 'mb_dashboard_update_layout',
     'mb_dashboard_card_update', 'mb_dashboard_card_remove', 'mb_dashboard_add_filter',
     'mb_dashboard_layout_optimize', 'mb_dashboard_template_executive',
     // Direct SQL dashboard
