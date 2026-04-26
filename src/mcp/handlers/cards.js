@@ -601,8 +601,9 @@ export class CardsHandler {
         ...(size_y !== undefined && { size_y })
       };
 
-      await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}/cards`, {
-        cards: cards.map(c => c.id === card_id ? updatedCard : c)
+      // Metabase v0.60+: use PUT /api/dashboard/:id with full dashcards array.
+      await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
+        dashcards: cards.map(c => c.id === card_id ? updatedCard : c)
       });
 
       return {
@@ -621,8 +622,19 @@ export class CardsHandler {
     const { dashboard_id, card_id } = args;
 
     try {
-      await this.metabaseClient.request('DELETE', `/api/dashboard/${dashboard_id}/cards`, {
-        dashcardId: card_id
+      // Metabase v0.60+: DELETE /api/dashboard/:id/cards was removed.
+      // Remove a dashcard by GETting current dashcards, filtering out the target,
+      // and PUTting the updated array back via PUT /api/dashboard/:id.
+      const dashboard = await this.metabaseClient.request('GET', `/api/dashboard/${dashboard_id}`);
+      const cards = dashboard.dashcards || dashboard.ordered_cards || [];
+
+      const filteredCards = cards.filter(c => c.id !== card_id);
+      if (filteredCards.length === cards.length) {
+        return { content: [{ type: 'text', text: `❌ Dashcard ${card_id} not found on dashboard ${dashboard_id}` }] };
+      }
+
+      await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
+        dashcards: filteredCards
       });
 
       return {
@@ -655,8 +667,10 @@ export class CardsHandler {
       // Copy cards
       const sourceCards = sourceDashboard.dashcards || sourceDashboard.ordered_cards || [];
       const cardIdMap = {};
+      const newDashcards = [];
 
-      for (const dashcard of sourceCards) {
+      for (let idx = 0; idx < sourceCards.length; idx++) {
+        const dashcard = sourceCards[idx];
         let cardId = dashcard.card_id;
 
         // If deep copy, copy the actual card first
@@ -673,17 +687,27 @@ export class CardsHandler {
           }
         }
 
-        // Add card to new dashboard
+        // Collect card entry using a negative id for new cards (Metabase v0.60+).
         if (cardId) {
-          await this.metabaseClient.request('POST', `/api/dashboard/${newDashboard.id}/cards`, {
-            cardId: cardId,
+          newDashcards.push({
+            id: -(idx + 1),
+            card_id: cardId,
             row: dashcard.row,
             col: dashcard.col,
             size_x: dashcard.size_x,
             size_y: dashcard.size_y,
-            parameter_mappings: dashcard.parameter_mappings
+            series: dashcard.series || [],
+            parameter_mappings: dashcard.parameter_mappings || [],
+            visualization_settings: dashcard.visualization_settings || {}
           });
         }
+      }
+
+      // Metabase v0.60+: add all cards in one PUT /api/dashboard/:id call.
+      if (newDashcards.length > 0) {
+        await this.metabaseClient.request('PUT', `/api/dashboard/${newDashboard.id}`, {
+          dashcards: newDashcards
+        });
       }
 
       return {

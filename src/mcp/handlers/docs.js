@@ -285,8 +285,7 @@ export class DocsHandler {
             'POST /api/dashboard - Create dashboard',
             'PUT /api/dashboard/:id - Update dashboard',
             'DELETE /api/dashboard/:id - Delete dashboard',
-            'POST /api/dashboard/:id/cards - Add card to dashboard',
-            'PUT /api/dashboard/:id/cards - Update dashboard cards'
+            'PUT /api/dashboard/:id - Add/update/remove dashcards (v0.60+, replaces /cards sub-endpoint)'
           ],
           examples: {
             'create': `{

@@ -568,34 +568,41 @@ export class MetabaseClient {
   }
 
   async addCardToDashboard(dashboardId, cardId, options = {}) {
+    // Metabase v0.60 removed POST /api/dashboard/:id/cards.
+    // The correct API is PUT /api/dashboard/:id with a full "dashcards" array.
+    // New cards use a negative id (e.g. -1); existing cards keep their real id.
     await this.ensureAuthenticated();
 
     try {
-      // Try the API first (various endpoints)
-      const endpoints = [
-        `/api/dashboard/${dashboardId}/cards`,
-        `/api/dashboard/${dashboardId}/dashcard`
-      ];
+      // 1. Fetch the current dashboard to get existing dashcards.
+      const dashboard = await this.request('GET', `/api/dashboard/${dashboardId}`);
+      const existingCards = dashboard.dashcards || dashboard.ordered_cards || [];
 
-      for (const endpoint of endpoints) {
-        try {
-          const response = await this.client.post(endpoint, {
-            card_id: cardId,
-            size_x: options.sizeX || 4,
-            size_y: options.sizeY || 4,
-            row: options.row || 0,
-            col: options.col || 0,
-            parameter_mappings: options.parameter_mappings || []
-          });
-          return response.data;
-        } catch (err) {
-          // Try next endpoint
-          continue;
-        }
-      }
+      // 2. Build the new dashcard entry with a unique negative id.
+      const minId = existingCards.reduce((min, c) => Math.min(min, c.id || 0), 0);
+      const newCardId = minId - 1;
 
-      // If API fails, use direct database insertion as fallback
-      return await this.addCardToDashboardDirect(dashboardId, cardId, options);
+      const newDashcard = {
+        id: newCardId,
+        card_id: cardId,
+        row: options.row !== undefined ? options.row : 0,
+        col: options.col !== undefined ? options.col : 0,
+        size_x: options.sizeX || options.size_x || 4,
+        size_y: options.sizeY || options.size_y || 4,
+        series: [],
+        parameter_mappings: options.parameter_mappings || [],
+        visualization_settings: options.visualization_settings || {}
+      };
+
+      // 3. PUT the full dashcards array (existing + new).
+      const updatedDashboard = await this.request('PUT', `/api/dashboard/${dashboardId}`, {
+        dashcards: [...existingCards, newDashcard]
+      });
+
+      // Return the newly created dashcard (server assigns real id).
+      const createdCards = updatedDashboard.dashcards || updatedDashboard.ordered_cards || [];
+      const created = createdCards.find(c => c.card_id === cardId && !existingCards.some(e => e.id === c.id));
+      return created || newDashcard;
 
     } catch (error) {
       throw new Error(`Failed to add card to dashboard: ${error.message}`);
