@@ -723,34 +723,43 @@ export function getToolDefinitions() {
           },
           parameters: {
             type: 'array',
-            description: 'Parameter definitions for the question',
+            description: 'Parameter definitions for the question. Two modes: (1) field-filter — set field_id to bind to a Metabase field, use [[AND {{name}}]] in SQL, set widget_type for the picker; (2) plain variable — omit field_id, use {{name}} in SQL for direct value substitution.',
             items: {
               type: 'object',
               properties: {
                 name: {
                   type: 'string',
-                  description: 'Parameter name (matches placeholder in SQL)'
-                },
-                type: {
-                  type: 'string',
-                  enum: ['date/single', 'date/range', 'string/=', 'string/contains', 'number/=', 'number/between', 'category'],
-                  description: 'Parameter type and operator'
+                  description: 'Parameter name — must match the placeholder in SQL (e.g. "date_range" for [[AND {{date_range}}]])'
                 },
                 display_name: {
                   type: 'string',
-                  description: 'Human-readable parameter name'
+                  description: 'Human-readable label shown in the filter widget'
+                },
+                type: {
+                  type: 'string',
+                  enum: ['text', 'number', 'date', 'date/single', 'date/range', 'date/month-year', 'date/quarter-year', 'date/relative', 'string/=', 'string/contains', 'number/=', 'number/between', 'category'],
+                  description: 'Parameter type for plain variable substitution. Ignored when field_id is set (field-filter mode uses widget_type instead).'
+                },
+                field_id: {
+                  type: 'number',
+                  description: 'Metabase field ID to bind this parameter to. Setting this switches to field-filter mode: Metabase maps the filter widget directly to the column, enabling relative date pickers, linked filters, etc. Use [[AND {{name}}]] in SQL (double brackets = optional clause).'
+                },
+                widget_type: {
+                  type: 'string',
+                  enum: ['date/range', 'date/single', 'date/relative', 'date/month-year', 'date/quarter-year', 'string/=', 'string/contains', 'number/=', 'number/between', 'category'],
+                  description: 'Widget type for field-filter parameters (field_id required). Controls which date/string/number picker is shown. Defaults to date/range when omitted on a date field.'
                 },
                 default_value: {
                   type: 'string',
-                  description: 'Default parameter value (optional)'
+                  description: 'Default value (optional)'
                 },
                 required: {
                   type: 'boolean',
-                  description: 'Whether parameter is required',
+                  description: 'Whether the parameter must be supplied before the query runs',
                   default: false
                 }
               },
-              required: ['name', 'type', 'display_name']
+              required: ['name', 'display_name']
             }
           },
           visualization: {

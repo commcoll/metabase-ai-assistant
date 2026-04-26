@@ -303,14 +303,29 @@ export class MetabaseClient {
     // Add parameter template tags
     if (questionData.parameters) {
       for (const param of questionData.parameters) {
-        nativeQuery.native["template-tags"][param.name] = {
+        const tag = {
           id: param.name,
           name: param.name,
           "display-name": param.display_name,
-          type: param.type || "text",
           required: param.required || false,
-          default: param.default_value
+          default: param.default_value ?? null
         };
+
+        if (param.field_id) {
+          // Field-filter (dimension) parameter — binds to a specific Metabase field.
+          // Metabase requires type:"dimension", a dimension array, and a widget-type.
+          tag.type = "dimension";
+          tag.dimension = ["field", param.field_id, null];
+          tag["widget-type"] = param.widget_type || param.type || "date/range";
+        } else {
+          // Plain variable substitution (text, number, date, category, etc.)
+          tag.type = param.type || "text";
+          if (param.widget_type) {
+            tag["widget-type"] = param.widget_type;
+          }
+        }
+
+        nativeQuery.native["template-tags"][param.name] = tag;
       }
     }
 
