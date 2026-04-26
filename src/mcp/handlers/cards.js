@@ -1127,10 +1127,7 @@ export class CardsHandler {
     try {
       const tableId = args.table_id;
 
-      // Get current table
-      const table = await this.metabaseClient.request('GET', `/api/table/${tableId}`);
-
-      // If updating
+      // If updating, do that first via /api/table/:id
       if (args.display_name || args.description || args.visibility_type) {
         const updateData = {};
         if (args.display_name) updateData.display_name = args.display_name;
@@ -1150,25 +1147,134 @@ export class CardsHandler {
         };
       }
 
-      // Return current metadata
+      // GET — use /query_metadata so we get the fields array with IDs in one call.
+      const meta = await this.metabaseClient.request('GET', `/api/table/${tableId}/query_metadata`);
+      const fields = meta.fields || [];
+
+      // Build a compact field list: id, name, base_type, semantic_type
+      const fieldLines = fields
+        .map(f => `  [${f.id}] ${f.name} (${f.base_type}${f.semantic_type ? ' / ' + f.semantic_type : ''})`)
+        .join('\\n');
+
       return {
         content: [{
           type: 'text',
-          text: `📋 **Table Metadata: ${table.display_name}**\\n\\n` +
+          text: `📋 **Table Metadata: ${meta.display_name}**\\n\\n` +
             `🆔 Table ID: ${tableId}\\n` +
-            `📛 Name: ${table.name}\\n` +
-            `📋 Display Name: ${table.display_name}\\n` +
-            `📝 Description: ${table.description || 'None'}\\n` +
-            `👁️ Visibility: ${table.visibility_type}\\n` +
-            `🗃️ Schema: ${table.schema}\\n` +
-            `📊 Fields: ${table.fields?.length || 0}`
-        }]
+            `📛 Name: ${meta.name}\\n` +
+            `📋 Display Name: ${meta.display_name}\\n` +
+            `📝 Description: ${meta.description || 'None'}\\n` +
+            `👁️ Visibility: ${meta.visibility_type}\\n` +
+            `🗃️ Schema: ${meta.schema}\\n` +
+            `📊 Fields (${fields.length}):\\n${fieldLines}`
+        }],
+        structuredContent: {
+          id: meta.id,
+          name: meta.name,
+          display_name: meta.display_name,
+          description: meta.description || null,
+          schema: meta.schema,
+          visibility_type: meta.visibility_type,
+          fields: fields.map(f => ({
+            id: f.id,
+            name: f.name,
+            display_name: f.display_name,
+            base_type: f.base_type,
+            semantic_type: f.semantic_type || null,
+            description: f.description || null
+          }))
+        }
       };
 
     } catch (error) {
       return {
         content: [{ type: 'text', text: `❌ Table metadata error: ${error.message}` }]
       };
+    }
+  }
+
+
+  async handleTableFields(args) {
+    const { table_id } = args;
+
+    try {
+      const meta = await this.metabaseClient.request('GET', `/api/table/${table_id}/query_metadata`);
+      const fields = meta.fields || [];
+
+      const fieldLines = fields
+        .map(f => `  [${f.id}] ${f.name}  (${f.base_type}${f.semantic_type ? ' / ' + f.semantic_type : ''})${f.description ? '  — ' + f.description : ''}`)
+        .join('\\n');
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Fields for table "${meta.display_name}" (ID: ${table_id}):\\n\\n${fieldLines}`
+        }],
+        structuredContent: {
+          table_id,
+          table_name: meta.name,
+          fields: fields.map(f => ({
+            id: f.id,
+            name: f.name,
+            display_name: f.display_name,
+            base_type: f.base_type,
+            semantic_type: f.semantic_type || null,
+            description: f.description || null
+          }))
+        }
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `❌ Table fields error: ${error.message}` }] };
+    }
+  }
+
+
+  async handleFieldResolve(args) {
+    const { table_id, field_name } = args;
+
+    try {
+      const meta = await this.metabaseClient.request('GET', `/api/table/${table_id}/query_metadata`);
+      const fields = meta.fields || [];
+
+      // Case-insensitive match on name or display_name
+      const needle = field_name.toLowerCase();
+      const match = fields.find(f =>
+        f.name.toLowerCase() === needle ||
+        (f.display_name && f.display_name.toLowerCase() === needle)
+      );
+
+      if (!match) {
+        const names = fields.map(f => f.name).join(', ');
+        return {
+          content: [{
+            type: 'text',
+            text: `❌ Field "${field_name}" not found in table ${table_id} ("${meta.name}").\\nAvailable fields: ${names}`
+          }]
+        };
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: `Field "${match.name}" in table "${meta.name}":\\n` +
+            `  ID: ${match.id}\\n` +
+            `  Display Name: ${match.display_name}\\n` +
+            `  Base Type: ${match.base_type}\\n` +
+            `  Semantic Type: ${match.semantic_type || 'None'}\\n` +
+            `  Description: ${match.description || 'None'}`
+        }],
+        structuredContent: {
+          id: match.id,
+          name: match.name,
+          display_name: match.display_name,
+          base_type: match.base_type,
+          semantic_type: match.semantic_type || null,
+          table_id,
+          table_name: meta.name
+        }
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `❌ Field resolve error: ${error.message}` }] };
     }
   }
 

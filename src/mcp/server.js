@@ -309,6 +309,8 @@ class MetabaseMCPServer {
       // ── Field Metadata ──
       case 'mb_field_metadata': return await this.cardsHandler.handleFieldMetadata(args);
       case 'mb_table_metadata': return await this.cardsHandler.handleTableMetadata(args);
+      case 'mb_table_fields': return await this.cardsHandler.handleTableFields(args);
+      case 'mb_field_resolve': return await this.cardsHandler.handleFieldResolve(args);
       case 'mb_field_values': return await this.cardsHandler.handleFieldValues(args);
 
       // ── Embedding ──

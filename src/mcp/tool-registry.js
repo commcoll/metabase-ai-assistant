@@ -290,6 +290,8 @@ const TOOL_METADATA = {
   // ── Field & Table Metadata ──
   mb_field_metadata: { title: 'Get/Update Field Metadata', write: true, destructive: false, idempotent: true },
   mb_table_metadata: { title: 'Get/Update Table Metadata', write: true, destructive: false, idempotent: true },
+  mb_table_fields: { title: 'List Fields for a Table' },
+  mb_field_resolve: { title: 'Resolve Field ID by Name' },
   mb_field_values: { title: 'Get Field Values' },
 
   // ── Embedding ──
@@ -2603,6 +2605,38 @@ export function getToolDefinitions() {
           }
         },
         required: ['table_id']
+      }
+    },
+    {
+      name: 'mb_table_fields',
+      description: 'List all fields (columns) for a table with their IDs, types, and semantic types. Use this to discover field_id values needed for mb_question_create_parametric field-filter parameters, MBQL aggregations, or mb_field_resolve.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          table_id: {
+            type: 'number',
+            description: 'Metabase table ID (get from mb_database_metadata or mb_search)'
+          }
+        },
+        required: ['table_id']
+      }
+    },
+    {
+      name: 'mb_field_resolve',
+      description: 'Look up a single field by name within a table and return its ID and type metadata. Faster than mb_table_fields when you already know the column name. Use this to get the field_id required for field-filter parametric questions.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          table_id: {
+            type: 'number',
+            description: 'Metabase table ID'
+          },
+          field_name: {
+            type: 'string',
+            description: 'Column name to look up (e.g. "posting_date", "customer", "outstanding_amount"). Case-insensitive. Matches on both internal name and display name.'
+          }
+        },
+        required: ['table_id', 'field_name']
       }
     },
     {
