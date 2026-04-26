@@ -515,27 +515,47 @@ export class CardsHandler {
       const dashboard = await this.metabaseClient.request('GET', `/api/dashboard/${dashboard_id}`);
 
       const cards = dashboard.dashcards || dashboard.ordered_cards || [];
+
+      // Build a card roster showing dashcard_id, card_id, question name and position.
+      // Each dashcard has a nested `card` object with the question details.
+      const cardRoster = cards.map(c =>
+        `  dashcard_id=${c.id}  card_id=${c.card_id}  ` +
+        `row=${c.row} col=${c.col} ${c.size_x}x${c.size_y}  ` +
+        `"${c.card?.name || '(text/heading card)'}"`
+      ).join('\n');
+
+      const paramLines = (dashboard.parameters || []).map(p =>
+        `  param_id=${p.id}  slug=${p.slug}  type=${p.type}  "${p.name}"`
+      ).join('\n');
+
       return {
         content: [{
           type: 'text',
-          text: `Dashboard Details:\n` +
-            `  ID: ${dashboard.id}\n` +
-            `  Name: ${dashboard.name}\n` +
+          text: `Dashboard: "${dashboard.name}" (ID: ${dashboard.id})\n` +
             `  Description: ${dashboard.description || 'None'}\n` +
-            `  Collection: ${dashboard.collection_id || 'Root'}\n` +
-            `  Cards: ${cards.length}\n` +
-            `  Parameters: ${(dashboard.parameters || []).length}\n` +
-            `  Creator: ${dashboard.creator?.email || 'Unknown'}\n` +
-            `  Created: ${dashboard.created_at}\n` +
-            `  Updated: ${dashboard.updated_at}\n` +
-            `  Embedding Enabled: ${dashboard.enable_embedding || false}`
+            `  Collection: ${dashboard.collection_id || 'Root'}\n\n` +
+            `Cards (${cards.length}):\n${cardRoster || '  (none)'}\n\n` +
+            `Filters (${(dashboard.parameters || []).length}):\n${paramLines || '  (none)'}`
         }],
         structuredContent: {
           id: dashboard.id,
           name: dashboard.name,
           description: dashboard.description || null,
-          cards: cards.map(c => ({ id: c.id, card_id: c.card_id })),
-          parameters: dashboard.parameters || [],
+          cards: cards.map(c => ({
+            dashcard_id: c.id,
+            card_id: c.card_id,
+            name: c.card?.name || null,
+            row: c.row,
+            col: c.col,
+            size_x: c.size_x,
+            size_y: c.size_y
+          })),
+          parameters: (dashboard.parameters || []).map(p => ({
+            id: p.id,
+            name: p.name,
+            slug: p.slug,
+            type: p.type
+          }))
         },
       };
     } catch (error) {
@@ -629,19 +649,26 @@ export class CardsHandler {
       const dashboard = await this.metabaseClient.request('GET', `/api/dashboard/${dashboard_id}`);
       const cards = dashboard.dashcards || dashboard.ordered_cards || [];
 
-      const filteredCards = cards.filter(c => c.id !== card_id);
-      if (filteredCards.length === cards.length) {
+      const removed = cards.find(c => c.id === card_id);
+      if (!removed) {
         return { content: [{ type: 'text', text: `❌ Dashcard ${card_id} not found on dashboard ${dashboard_id}` }] };
       }
+
+      const filteredCards = cards.filter(c => c.id !== card_id);
 
       await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
         dashcards: filteredCards
       });
 
+      const remaining = filteredCards.map(c =>
+        `  dashcard_id=${c.id}  card_id=${c.card_id}  "${c.card?.name || '(card)'}"`
+      ).join('\n');
+
       return {
         content: [{
           type: 'text',
-          text: `✅ Card ${card_id} removed from dashboard ${dashboard_id}`
+          text: `✅ Removed dashcard ${card_id} (question "${removed.card?.name || removed.card_id}") from dashboard ${dashboard_id}\n\n` +
+            `Remaining cards (${filteredCards.length}):\n${remaining || '  (none)'}`
         }]
       };
     } catch (error) {
