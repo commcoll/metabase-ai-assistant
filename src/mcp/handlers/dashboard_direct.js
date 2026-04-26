@@ -1,11 +1,10 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { logger } from '../../utils/logger.js';
-import { config } from '../../utils/config.js';
 import { sanitizeNumber, sanitizeString, sanitizeJson } from '../../utils/sql-sanitizer.js';
 
 /**
- * Handler for Direct SQL Dashboard Operations
- * Bypasses API limitations by directly interacting with Internal DB
+ * Handler for Dashboard Operations
+ * Uses the Metabase REST API for all dashboard mutations.
  */
 export class DashboardDirectHandler {
     constructor(metabaseClient, metadataHandler) {
@@ -14,56 +13,74 @@ export class DashboardDirectHandler {
     }
 
     /**
-     * Batch Update Dashboard Layout via SQL
-     * Direct UPDATE to report_dashboardcard
+     * Batch Update Dashboard Layout via Metabase API
+     * GET /api/dashboard/{id} to fetch current dashcards (each with a real integer id),
+     * then PUT /api/dashboard/{id} with the full updated dashcards array.
      */
     async handleUpdateLayoutSql(args) {
         const { dashboard_id, updates } = args;
 
-        let internalDbId;
+        logger.info(`Updating layout for ${updates.length} cards on dashboard ${dashboard_id} via API`);
+
+        // 1. Fetch the current dashboard to get real dashcard IDs and full objects.
+        let dashboard;
         try {
-            internalDbId = await this.metadataHandler.getInternalDbId();
-        } catch (e) {
-            internalDbId = 6;
+            dashboard = await this.metabaseClient.request('GET', `/api/dashboard/${dashboard_id}`);
+        } catch (error) {
+            throw new McpError(ErrorCode.InternalError, `Failed to fetch dashboard ${dashboard_id}: ${error.message}`);
         }
 
-        const safeDashboardId = sanitizeNumber(dashboard_id);
-        const results = [];
+        const dashcards = dashboard.dashcards || dashboard.ordered_cards || [];
+
+        // 2. Build a lookup map from card_id -> dashcard for efficient access.
+        //    There may be multiple dashcards with the same card_id (same question added
+        //    more than once), so we track which ones have already been updated to avoid
+        //    applying the same update twice.
+        const byCardId = {};
+        for (const dc of dashcards) {
+            if (dc.card_id != null) {
+                if (!byCardId[dc.card_id]) byCardId[dc.card_id] = [];
+                byCardId[dc.card_id].push(dc);
+            }
+        }
+
+        const applied = [];
         const errors = [];
 
-        logger.info(`Updating layout for ${updates.length} cards on dashboard ${safeDashboardId} (DB: ${internalDbId})`);
-
+        // 3. Apply each requested position update to the matching dashcard in-place.
         for (const update of updates) {
-            try {
-                if (!update.card_id) continue;
+            if (!update.card_id) continue;
 
-                const safeCardId = sanitizeNumber(update.card_id);
-                const setParts = [];
-                if (update.row !== undefined) setParts.push(`row = ${sanitizeNumber(update.row)}`);
-                if (update.col !== undefined) setParts.push(`col = ${sanitizeNumber(update.col)}`);
-                if (update.size_x !== undefined) setParts.push(`size_x = ${sanitizeNumber(update.size_x)}`);
-                if (update.size_y !== undefined) setParts.push(`size_y = ${sanitizeNumber(update.size_y)}`);
-
-                setParts.push(`updated_at = NOW()`);
-
-                const sql = `
-            UPDATE report_dashboardcard
-            SET ${setParts.join(', ')}
-            WHERE dashboard_id = ${safeDashboardId} AND card_id = ${safeCardId}
-        `;
-
-                await this.metabaseClient.executeNativeQuery(internalDbId, sql, { enforcePrefix: false });
-                results.push(`✅ Card ${safeCardId}`);
-
-            } catch (error) {
-                errors.push(`❌ Card ${update.card_id}: ${error.message}`);
+            const candidates = byCardId[update.card_id];
+            if (!candidates || candidates.length === 0) {
+                errors.push(`Card ${update.card_id} not found on dashboard`);
+                continue;
             }
+
+            // Use the first unmodified candidate (or the only one available).
+            const dc = candidates.shift();
+
+            if (update.row !== undefined) dc.row = update.row;
+            if (update.col !== undefined) dc.col = update.col;
+            if (update.size_x !== undefined) dc.size_x = update.size_x;
+            if (update.size_y !== undefined) dc.size_y = update.size_y;
+
+            applied.push(update.card_id);
+        }
+
+        // 4. PUT the full updated dashcards array back.
+        try {
+            await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
+                dashcards: dashcards
+            });
+        } catch (error) {
+            throw new McpError(ErrorCode.InternalError, `Failed to PUT dashboard layout: ${error.message}`);
         }
 
         return {
             content: [{
                 type: 'text',
-                text: `🏗️ **Layout Update Results**\nDashboard: ${safeDashboardId}\nSuccess: ${results.length}\nErrors: ${errors.length}\n\n${errors.join('\n')}`
+                text: `**Layout Update Results**\nDashboard: ${dashboard_id}\nUpdated: ${applied.length}\nErrors: ${errors.length}${errors.length ? '\n\n' + errors.join('\n') : ''}`
             }]
         };
     }
@@ -156,26 +173,36 @@ export class DashboardDirectHandler {
     }
 
     /**
-     * Link Dashboard Filter to Card Parameter
-     * Updates parameter_mappings JSONB
+     * Link Dashboard Filter to Card Parameter via Metabase API
+     * GET /api/dashboard/{id} to fetch current dashcards, update parameter_mappings
+     * on the matching dashcard, then PUT /api/dashboard/{id} with full dashcards array.
      */
     async handleLinkDashboardFilter(args) {
         const { dashboard_id, card_id, mappings } = args;
 
-        let internalDbId;
+        logger.info(`Linking filter on dashboard ${dashboard_id} card ${card_id} via API`);
+
+        // 1. Fetch current dashboard.
+        let dashboard;
         try {
-            internalDbId = await this.metadataHandler.getInternalDbId();
-        } catch (e) {
-            internalDbId = 6;
+            dashboard = await this.metabaseClient.request('GET', `/api/dashboard/${dashboard_id}`);
+        } catch (error) {
+            throw new McpError(ErrorCode.InternalError, `Failed to fetch dashboard ${dashboard_id}: ${error.message}`);
         }
 
-        const safeDashboardId = sanitizeNumber(dashboard_id);
-        const safeCardId = sanitizeNumber(card_id);
+        const dashcards = dashboard.dashcards || dashboard.ordered_cards || [];
 
+        // 2. Find the target dashcard by card_id.
+        const targetDashcard = dashcards.find(dc => dc.card_id === card_id);
+        if (!targetDashcard) {
+            throw new McpError(ErrorCode.InvalidRequest, `Card ${card_id} not found on dashboard ${dashboard_id}`);
+        }
+
+        // 3. Build the new parameter_mappings array.
         const mappingArray = mappings.map(m => {
             const mapObj = {
                 "parameter_id": m.parameter_id,
-                "card_id": safeCardId,
+                "card_id": card_id,
                 "target": null
             };
 
@@ -191,26 +218,26 @@ export class DashboardDirectHandler {
             return mapObj;
         });
 
-        const jsonMappings = sanitizeJson(mappingArray);
+        // 4. Merge with any existing mappings (replace any that share parameter_id).
+        const existingMappings = targetDashcard.parameter_mappings || [];
+        const incomingIds = new Set(mappingArray.map(m => m.parameter_id));
+        const retained = existingMappings.filter(m => !incomingIds.has(m.parameter_id));
+        targetDashcard.parameter_mappings = [...retained, ...mappingArray];
 
-        const sql = `
-            UPDATE report_dashboardcard 
-            SET parameter_mappings = '${jsonMappings}',
-                updated_at = NOW()
-            WHERE dashboard_id = ${safeDashboardId} AND card_id = ${safeCardId}
-        `;
-
+        // 5. PUT the full updated dashcards array back.
         try {
-            await this.metabaseClient.executeNativeQuery(internalDbId, sql, { enforcePrefix: false });
-            return {
-                content: [{
-                    type: 'text',
-                    text: `✅ **Filter Linked**\nDashboard: ${safeDashboardId}\nCard: ${safeCardId}\nMappings Applied: ${mappings.length}`
-                }]
-            };
+            await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
+                dashcards: dashcards
+            });
         } catch (error) {
-            logger.error(`Failed to link filters: ${error.message}`);
-            throw new McpError(ErrorCode.InternalError, `Link Filter SQL Failed: ${error.message}`);
+            throw new McpError(ErrorCode.InternalError, `Failed to PUT dashboard filter mappings: ${error.message}`);
         }
+
+        return {
+            content: [{
+                type: 'text',
+                text: `**Filter Linked**\nDashboard: ${dashboard_id}\nCard: ${card_id}\nMappings Applied: ${mappings.length}`
+            }]
+        };
     }
 }

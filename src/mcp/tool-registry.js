@@ -834,7 +834,7 @@ export function getToolDefinitions() {
     },
     {
       name: 'mb_dashboard_update_layout',
-      description: 'Batch update position and size of multiple dashboard cards via direct SQL. Guarantees layout application.',
+      description: 'Batch update position and size of multiple dashboard cards using the Metabase API (PUT /api/dashboard/{id}). Guarantees layout application.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -888,7 +888,7 @@ export function getToolDefinitions() {
     },
     {
       name: 'mb_link_dashboard_filter',
-      description: 'Link a dashboard filter to a card parameter via SQL. Updates parameter_mappings.',
+      description: 'Link a dashboard filter to a card parameter using the Metabase API (PUT /api/dashboard/{id}). Updates parameter_mappings on the target dashcard.',
       inputSchema: {
         type: 'object',
         properties: {
