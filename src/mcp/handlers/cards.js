@@ -462,8 +462,8 @@ export class CardsHandler {
       // VERIFICATION: Check if card was actually added
       try {
         const dashboard = await this.metabaseClient.getDashboard(args.dashboard_id);
-        const cardExists = dashboard.ordered_cards?.some(c => c.card_id === args.question_id);
-        const cardCount = dashboard.ordered_cards?.length || 0;
+        const cardExists = dashboard.dashcards?.some(c => c.card_id === args.question_id);
+        const cardCount = dashboard.dashcards?.length || 0;
 
         if (cardExists) {
           return {
@@ -762,18 +762,64 @@ export class CardsHandler {
 
   async handleOptimizeDashboardLayout(args) {
     try {
-      const result = await this.metabaseClient.optimizeDashboardLayout(args);
+      // 1. Fetch current dashboard and its dashcards
+      const dashboard = await this.metabaseClient.request('GET', `/api/dashboard/${args.dashboard_id}`);
+      const cards = dashboard.dashcards || [];
+
+      if (cards.length === 0) {
+        return {
+          content: [{ type: 'text', text: `ℹ️ Dashboard ${args.dashboard_id} has no cards to optimise.` }],
+        };
+      }
+
+      // 2. Local bin-packing: sort by area descending, then fill rows left-to-right
+      const GRID_WIDTH = args.grid_width || 12;
+      const DEFAULT_W = 6;
+      const DEFAULT_H = 4;
+
+      // Sort largest cards first so they anchor the layout
+      const sorted = [...cards].sort((a, b) => {
+        const areaA = (a.size_x || DEFAULT_W) * (a.size_y || DEFAULT_H);
+        const areaB = (b.size_x || DEFAULT_W) * (b.size_y || DEFAULT_H);
+        return areaB - areaA;
+      });
+
+      let col = 0;
+      let row = 0;
+      let rowHeight = 0;
+
+      const optimisedCards = sorted.map(card => {
+        const w = card.size_x || DEFAULT_W;
+        const h = card.size_y || DEFAULT_H;
+
+        // Wrap to next row if card doesn't fit in remaining columns
+        if (col + w > GRID_WIDTH) {
+          row += rowHeight;
+          col = 0;
+          rowHeight = 0;
+        }
+
+        const placed = { ...card, col, row, size_x: w, size_y: h };
+        col += w;
+        if (h > rowHeight) rowHeight = h;
+        return placed;
+      });
+
+      // 3. PUT updated dashcards back
+      await this.metabaseClient.request('PUT', `/api/dashboard/${args.dashboard_id}`, {
+        dashcards: optimisedCards
+      });
 
       return {
         content: [{
           type: 'text',
-          text: `✅ Dashboard layout optimized!\\nStyle: ${args.layout_style}\\nCards repositioned: ${result.repositioned_cards}\\nOptimizations applied: ${result.optimizations.join(', ')}`
+          text: `✅ Dashboard layout optimised!\\nDashboard ID: ${args.dashboard_id}\\nCards repositioned: ${optimisedCards.length}`
         }],
       };
 
     } catch (error) {
       return {
-        content: [{ type: 'text', text: `❌ Error optimizing dashboard layout: ${error.message}` }],
+        content: [{ type: 'text', text: `❌ Error optimising dashboard layout: ${error.message}` }],
       };
     }
   }
@@ -1286,55 +1332,6 @@ export class CardsHandler {
       };
     } catch (error) {
       return { content: [{ type: 'text', text: `❌ Search error: ${error.message}` }] };
-    }
-  }
-
-
-  // ==================== SEGMENT HANDLERS ====================
-
-  async handleSegmentCreate(args) {
-    const { name, description, table_id, definition } = args;
-
-    try {
-      const segment = await this.metabaseClient.request('POST', '/api/segment', {
-        name,
-        description,
-        table_id,
-        definition
-      });
-
-      return {
-        content: [{
-          type: 'text',
-          text: `✅ Segment created:\n  ID: ${segment.id}\n  Name: ${segment.name}\n  Table: ${segment.table_id}`
-        }]
-      };
-    } catch (error) {
-      return { content: [{ type: 'text', text: `❌ Segment create error: ${error.message}` }] };
-    }
-  }
-
-
-  async handleSegmentList(args) {
-    const { table_id } = args;
-
-    try {
-      let segments = await this.metabaseClient.request('GET', '/api/segment');
-
-      if (table_id) {
-        segments = segments.filter(s => s.table_id === table_id);
-      }
-
-      return {
-        content: [{
-          type: 'text',
-          text: `Found ${segments.length} segments:\n${segments.map(s =>
-            `  - [${s.id}] ${s.name} (Table: ${s.table_id})`
-          ).join('\n')}`
-        }]
-      };
-    } catch (error) {
-      return { content: [{ type: 'text', text: `❌ Segment list error: ${error.message}` }] };
     }
   }
 

@@ -318,10 +318,6 @@ class MetabaseMCPServer {
       // ── Search ──
       case 'mb_search': return await this.cardsHandler.handleSearch(args);
 
-      // ── Segments ──
-      case 'mb_segment_create': return await this.cardsHandler.handleSegmentCreate(args);
-      case 'mb_segment_list': return await this.cardsHandler.handleSegmentList(args);
-
       // ── Bookmarks ──
       case 'mb_bookmark_create': return await this.cardsHandler.handleBookmarkCreate(args);
       case 'mb_bookmark_list': return await this.cardsHandler.handleBookmarkList(args);

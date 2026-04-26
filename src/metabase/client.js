@@ -425,55 +425,15 @@ export class MetabaseClient {
   }
 
   async executeDDLOperation(databaseId, sql) {
-    try {
-      // DDL için action endpoint kullan
-      const response = await this.client.post('/api/action/execute', {
-        database_id: databaseId,
-        sql: sql,
-        type: 'query'
-      });
-
-      return {
-        status: 'success',
-        message: 'DDL operation completed',
-        data: { rows: [], cols: [] },
-        sql: sql
-      };
-    } catch (error) {
-      // Eğer action endpoint çalışmazsa normal endpoint dene
-      try {
-        const query = {
-          database: databaseId,
-          type: 'native',
-          native: {
-            query: sql
-          }
-        };
-
-        await this.runQuery(query);
-        return {
-          status: 'success',
-          message: 'DDL operation completed via dataset endpoint',
-          data: { rows: [], cols: [] },
-          sql: sql
-        };
-      } catch (secondError) {
-        logger.warn('DDL execution warning:', secondError.message);
-
-        // DDL işlemi başarılı olmuş olabilir, kontrol et
-        if (secondError.message.includes('Select statement did not produce a ResultSet')) {
-          return {
-            status: 'success',
-            message: 'DDL operation likely completed (ResultSet warning is normal)',
-            data: { rows: [], cols: [] },
-            sql: sql,
-            warning: secondError.message
-          };
-        }
-
-        throw secondError;
-      }
-    }
+    // POST /api/action/execute is not an ad-hoc SQL endpoint and was never a
+    // supported DDL path. Metabase v0.60 does not provide any API for running
+    // DDL statements directly. Use the dedicated schema-creation tools
+    // (db_table_create, db_view_create, etc.) which call the correct endpoints,
+    // or execute DDL directly against the source database.
+    throw new Error(
+      'DDL operations are not supported on this Metabase version. ' +
+      'Use db_table_create, db_view_create, db_matview_create, or db_index_create tools instead.'
+    );
   }
 
   isDDLOperation(sql) {
@@ -526,15 +486,29 @@ export class MetabaseClient {
   }
 
   // Metric Operations
+  // In Metabase v0.50+ the /api/metric endpoint was removed.
+  // Metrics are now regular cards with type: 'metric'.
   async getMetrics() {
     await this.ensureAuthenticated();
-    const response = await this.client.get('/api/metric');
+    const response = await this.client.get('/api/card', {
+      params: { f: 'metric' }
+    });
     return response.data;
   }
 
   async createMetric(metric) {
     await this.ensureAuthenticated();
-    const response = await this.client.post('/api/metric', metric);
+    // Build a card payload that represents a metric (v0.60 card schema)
+    const payload = {
+      name: metric.name,
+      description: metric.description,
+      dataset_query: metric.dataset_query,
+      display: metric.display || 'scalar',
+      visualization_settings: metric.visualization_settings || {},
+      type: 'metric',
+      collection_id: metric.collection_id || null,
+    };
+    const response = await this.client.post('/api/card', payload);
     return response.data;
   }
 

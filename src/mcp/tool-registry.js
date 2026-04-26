@@ -314,10 +314,6 @@ const TOOL_METADATA = {
     }
   },
 
-  // ── Segments ──
-  mb_segment_create: { title: 'Create Segment', write: true, destructive: false, idempotent: false },
-  mb_segment_list: { title: 'List Segments' },
-
   // ── Bookmarks ──
   mb_bookmark_create: { title: 'Create Bookmark', write: true, destructive: false, idempotent: true },
   mb_bookmark_list: { title: 'List Bookmarks' },
@@ -3196,46 +3192,6 @@ export function getToolDefinitions() {
           }
         },
         required: ['query']
-      }
-    },
-    // ==================== SEGMENTS ====================
-    {
-      name: 'mb_segment_create',
-      description: 'Create a segment (reusable filter) for a table',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          name: {
-            type: 'string',
-            description: 'Segment name'
-          },
-          description: {
-            type: 'string',
-            description: 'Segment description'
-          },
-          table_id: {
-            type: 'number',
-            description: 'Table ID to create segment for'
-          },
-          definition: {
-            type: 'object',
-            description: 'MBQL filter definition'
-          }
-        },
-        required: ['name', 'table_id', 'definition']
-      }
-    },
-    {
-      name: 'mb_segment_list',
-      description: 'List all segments',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          table_id: {
-            type: 'number',
-            description: 'Filter by table ID (optional)'
-          }
-        }
       }
     },
     // ==================== BOOKMARKS ====================

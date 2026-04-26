@@ -33,8 +33,8 @@ const WRITE_TOOLS = new Set([
     'mb_action_create', 'mb_action_execute', 'mb_alert_create', 'mb_pulse_create',
     // Metadata mutations
     'mb_field_metadata', 'mb_table_metadata',
-    // Metric & segment
-    'mb_metric_create', 'mb_segment_create',
+    // Metric
+    'mb_metric_create',
     // Copy/clone (creates new items)
     'mb_card_copy', 'mb_card_clone', 'mb_dashboard_copy', 'mb_collection_copy',
     // Bookmarks

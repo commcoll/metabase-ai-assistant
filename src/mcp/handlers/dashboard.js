@@ -127,7 +127,7 @@ export async function handleOptimizeDashboardLayout(args, context) {
     const { metabaseClient } = context;
 
     const dashboard = await metabaseClient.getDashboard(args.dashboard_id);
-    const cards = dashboard.ordered_cards || [];
+    const cards = dashboard.dashcards || [];
 
     const layoutStyle = args.layout_style || 'executive';
     const gridWidth = args.grid_width || 12;
@@ -141,14 +141,14 @@ export async function handleOptimizeDashboardLayout(args, context) {
             ...card,
             row,
             col,
-            sizeX: 6,
-            sizeY: 4
+            size_x: card.size_x || 6,
+            size_y: card.size_y || 4
         };
     });
 
     // Update dashboard
     await metabaseClient.updateDashboard(args.dashboard_id, {
-        ordered_cards: optimizedCards
+        dashcards: optimizedCards
     });
 
     return {
