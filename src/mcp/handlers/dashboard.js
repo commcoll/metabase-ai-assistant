@@ -127,12 +127,13 @@ export async function handleOptimizeDashboardLayout(args, context) {
     const { metabaseClient } = context;
 
     const dashboard = await metabaseClient.getDashboard(args.dashboard_id);
-    const cards = dashboard.dashcards || [];
+    // Metabase v0.60+ returns dashcards; older versions used ordered_cards.
+    const cards = dashboard.dashcards || dashboard.ordered_cards || [];
 
     const layoutStyle = args.layout_style || 'executive';
     const gridWidth = args.grid_width || 12;
 
-    // Calculate optimized positions
+    // Calculate optimized positions using snake_case field names expected by the API.
     const optimizedCards = cards.map((card, index) => {
         const row = Math.floor(index / 2) * 4;
         const col = (index % 2) * 6;
@@ -141,12 +142,12 @@ export async function handleOptimizeDashboardLayout(args, context) {
             ...card,
             row,
             col,
-            size_x: card.size_x || 6,
-            size_y: card.size_y || 4
+            size_x: 6,
+            size_y: 4
         };
     });
 
-    // Update dashboard
+    // Update dashboard via PUT with dashcards (v0.60+ key).
     await metabaseClient.updateDashboard(args.dashboard_id, {
         dashcards: optimizedCards
     });

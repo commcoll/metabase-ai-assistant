@@ -455,15 +455,16 @@ export class CardsHandler {
       const result = await this.metabaseClient.addCardToDashboard(
         args.dashboard_id,
         args.question_id,
-        options, // Pass normalized options instead of raw args
-        args.parameter_mappings // Double pass, just in case (client signature check needed)
+        options
       );
 
       // VERIFICATION: Check if card was actually added
       try {
         const dashboard = await this.metabaseClient.getDashboard(args.dashboard_id);
-        const cardExists = dashboard.dashcards?.some(c => c.card_id === args.question_id);
-        const cardCount = dashboard.dashcards?.length || 0;
+        // v0.60+ uses dashcards; older versions used ordered_cards.
+        const allCards = dashboard.dashcards || dashboard.ordered_cards || [];
+        const cardExists = allCards.some(c => c.card_id === args.question_id);
+        const cardCount = allCards.length;
 
         if (cardExists) {
           return {
@@ -675,16 +676,32 @@ export class CardsHandler {
 
         // If deep copy, copy the actual card first
         if (deep_copy && cardId) {
-          const copiedCard = await this.handleCardCopy({
-            card_id: cardId,
-            collection_id: collection_id || sourceDashboard.collection_id
-          });
-          // Extract new card ID from response
-          const match = copiedCard.content[0].text.match(/New Card ID: (\d+)/);
-          if (match) {
-            cardIdMap[cardId] = parseInt(match[1]);
-            cardId = cardIdMap[cardId];
+          try {
+            const copiedCard = await this.handleCardCopy({
+              card_id: cardId,
+              collection_id: collection_id || sourceDashboard.collection_id
+            });
+            // Extract new card ID from the handler response text.
+            const match = copiedCard.content[0].text.match(/New Card ID: (\d+)/);
+            if (match) {
+              cardIdMap[cardId] = parseInt(match[1]);
+              cardId = cardIdMap[cardId];
+            } else {
+              logger.warn(`Could not parse new card ID from copy response for card ${cardId} — keeping original`);
+            }
+          } catch (copyErr) {
+            logger.warn(`Failed to copy card ${cardId}: ${copyErr.message} — skipping dashcard`);
+            continue;
           }
+        }
+
+        // Remap parameter_mappings so they reference the new card IDs after deep copy.
+        let mappings = dashcard.parameter_mappings || [];
+        if (deep_copy && Object.keys(cardIdMap).length > 0) {
+          mappings = mappings.map(m => ({
+            ...m,
+            card_id: cardIdMap[m.card_id] ?? m.card_id
+          }));
         }
 
         // Collect card entry using a negative id for new cards (Metabase v0.60+).
@@ -697,7 +714,7 @@ export class CardsHandler {
             size_x: dashcard.size_x,
             size_y: dashcard.size_y,
             series: dashcard.series || [],
-            parameter_mappings: dashcard.parameter_mappings || [],
+            parameter_mappings: mappings,
             visualization_settings: dashcard.visualization_settings || {}
           });
         }

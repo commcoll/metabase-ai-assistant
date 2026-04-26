@@ -20,6 +20,12 @@ export class DashboardDirectHandler {
     async handleUpdateLayoutSql(args) {
         const { dashboard_id, updates } = args;
 
+        if (!updates || updates.length === 0) {
+            return {
+                content: [{ type: 'text', text: 'No layout updates provided — nothing to do.' }]
+            };
+        }
+
         logger.info(`Updating layout for ${updates.length} cards on dashboard ${dashboard_id} via API`);
 
         // 1. Fetch the current dashboard to get real dashcard IDs and full objects.
@@ -178,7 +184,7 @@ export class DashboardDirectHandler {
      * on the matching dashcard, then PUT /api/dashboard/{id} with full dashcards array.
      */
     async handleLinkDashboardFilter(args) {
-        const { dashboard_id, card_id, mappings } = args;
+        const { dashboard_id, card_id, dashcard_id, mappings } = args;
 
         logger.info(`Linking filter on dashboard ${dashboard_id} card ${card_id} via API`);
 
@@ -192,10 +198,20 @@ export class DashboardDirectHandler {
 
         const dashcards = dashboard.dashcards || dashboard.ordered_cards || [];
 
-        // 2. Find the target dashcard by card_id.
-        const targetDashcard = dashcards.find(dc => dc.card_id === card_id);
-        if (!targetDashcard) {
-            throw new McpError(ErrorCode.InvalidRequest, `Card ${card_id} not found on dashboard ${dashboard_id}`);
+        // 2. Find the target dashcard.
+        // Prefer dashcard_id (the dashcard's own integer id) so callers can disambiguate
+        // when the same question appears on the dashboard more than once.
+        let targetDashcard;
+        if (dashcard_id != null) {
+            targetDashcard = dashcards.find(dc => dc.id === dashcard_id);
+            if (!targetDashcard) {
+                throw new McpError(ErrorCode.InvalidRequest, `Dashcard ${dashcard_id} not found on dashboard ${dashboard_id}`);
+            }
+        } else {
+            targetDashcard = dashcards.find(dc => dc.card_id === card_id);
+            if (!targetDashcard) {
+                throw new McpError(ErrorCode.InvalidRequest, `Card ${card_id} not found on dashboard ${dashboard_id}`);
+            }
         }
 
         // 3. Build the new parameter_mappings array.
@@ -212,11 +228,19 @@ export class DashboardDirectHandler {
                 if (Array.isArray(m.target_value)) {
                     mapObj.target = m.target_value;
                 } else {
-                    mapObj.target = ["dimension", ["field", m.target_value, null]];
+                    // Field IDs must be integers — coerce from string if needed.
+                    const fieldId = parseInt(m.target_value, 10);
+                    if (isNaN(fieldId)) {
+                        throw new McpError(ErrorCode.InvalidParams, `target_value '${m.target_value}' is not a valid field ID integer`);
+                    }
+                    mapObj.target = ["dimension", ["field", fieldId, null]];
                 }
+            } else {
+                logger.warn(`Unknown target_type '${m.target_type}' for mapping ${m.parameter_id} — skipping`);
+                return null;
             }
             return mapObj;
-        });
+        }).filter(m => m !== null);
 
         // 4. Merge with any existing mappings (replace any that share parameter_id).
         const existingMappings = targetDashcard.parameter_mappings || [];

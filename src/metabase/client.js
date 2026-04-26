@@ -486,35 +486,74 @@ export class MetabaseClient {
   }
 
   // Metric Operations
-  // In Metabase v0.50+ the /api/metric endpoint was removed.
-  // Metrics are now regular cards with type: 'metric'.
+  // NOTE: /api/metric and /api/segment were removed in Metabase v0.49+.
+  // Metrics are now ordinary cards with type='metric' stored via /api/card.
   async getMetrics() {
     await this.ensureAuthenticated();
-    const response = await this.client.get('/api/card', {
-      params: { f: 'metric' }
-    });
+    const response = await this.client.get('/api/card', { params: { f: 'metric' } });
     return response.data;
   }
 
-  async createMetric(metric) {
+  async createMetric(args) {
     await this.ensureAuthenticated();
-    // Build a card payload that represents a metric (v0.60 card schema)
-    const payload = {
-      name: metric.name,
-      description: metric.description,
-      dataset_query: metric.dataset_query,
-      display: metric.display || 'scalar',
-      visualization_settings: metric.visualization_settings || {},
-      type: 'metric',
-      collection_id: metric.collection_id || null,
+
+    // Look up the table to determine which database it belongs to.
+    let databaseId;
+    try {
+      const table = await this.request('GET', `/api/table/${args.table_id}`);
+      databaseId = table.db_id;
+    } catch (e) {
+      throw new Error(`Could not look up table ${args.table_id}: ${e.message}`);
+    }
+
+    // Build MBQL aggregation clause.
+    const agg = args.aggregation || { type: 'count' };
+    let aggregationClause;
+    if (agg.type === 'count') {
+      aggregationClause = ['count'];
+    } else if (agg.field_id) {
+      aggregationClause = [agg.type, ['field', agg.field_id, null]];
+    } else {
+      throw new Error(`Aggregation type '${agg.type}' requires a field_id`);
+    }
+
+    // Build MBQL query.
+    const query = {
+      'source-table': args.table_id,
+      aggregation: [aggregationClause]
     };
-    const response = await this.client.post('/api/card', payload);
+
+    // Build MBQL filter clause from optional filters array.
+    if (args.filters && args.filters.length > 0) {
+      const filterClauses = args.filters.map(f => {
+        if (f.operator === 'is-null') return ['is-null', ['field', f.field_id, null]];
+        if (f.operator === 'not-null') return ['not-null', ['field', f.field_id, null]];
+        return [f.operator, ['field', f.field_id, null], f.value];
+      });
+      query.filter = filterClauses.length === 1 ? filterClauses[0] : ['and', ...filterClauses];
+    }
+
+    const cardPayload = {
+      name: args.name,
+      description: args.description,
+      type: 'metric',
+      dataset_query: {
+        database: databaseId,
+        type: 'query',
+        query
+      },
+      display: 'table',
+      visualization_settings: {}
+    };
+
+    const response = await this.client.post('/api/card', cardPayload);
     return response.data;
   }
 
   async updateMetric(id, updates) {
+    // In Metabase v0.49+ metrics are cards; update via PUT /api/card/:id.
     await this.ensureAuthenticated();
-    const response = await this.client.put(`/api/metric/${id}`, updates);
+    const response = await this.client.put(`/api/card/${id}`, updates);
     return response.data;
   }
 

@@ -884,20 +884,21 @@ export function getToolDefinitions() {
     },
     {
       name: 'mb_link_dashboard_filter',
-      description: 'Link a dashboard filter to a card parameter using the Metabase API (PUT /api/dashboard/{id}). Updates parameter_mappings on the target dashcard.',
+      description: 'Link a dashboard filter to a card parameter using the Metabase API (PUT /api/dashboard/{id}). Updates parameter_mappings on the target dashcard. When the same question appears on the dashboard more than once, supply dashcard_id (the dashcard\'s own integer id) to target the correct instance.',
       inputSchema: {
         type: 'object',
         properties: {
           dashboard_id: { type: 'number' },
-          card_id: { type: 'number' },
+          card_id: { type: 'number', description: 'The question/card id (card_id on the dashcard)' },
+          dashcard_id: { type: 'number', description: 'Optional: the dashcard\'s own id. Use this when the same question appears on the dashboard more than once to target the correct instance.' },
           mappings: {
             type: 'array',
             items: {
               type: 'object',
               properties: {
                 parameter_id: { type: 'string', description: 'The GUID of the dashboard parameter' },
-                target_type: { type: 'string', enum: ['variable', 'dimension'] },
-                target_value: { type: 'string', description: 'Variable name (without {{}}) or Field ID for dimension' }
+                target_type: { type: 'string', enum: ['variable', 'dimension'], description: 'variable = native SQL template tag; dimension = MBQL field filter' },
+                target_value: { type: 'string', description: 'For variable: the template-tag name (without {{}}). For dimension: the integer Field ID.' }
               },
               required: ['parameter_id', 'target_type', 'target_value']
             }
