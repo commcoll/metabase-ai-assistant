@@ -219,6 +219,8 @@ const TOOL_METADATA = {
   mb_dashboard_card_remove: { title: 'Remove Dashboard Card', write: true, destructive: true, idempotent: true },
   mb_dashboard_copy: { title: 'Copy Dashboard', write: true, destructive: false, idempotent: false },
   mb_dashboard_add_filter: { title: 'Add Dashboard Filter', write: true, destructive: false, idempotent: false },
+  mb_dashboard_filter_update: { title: 'Update Dashboard Filter', write: true, destructive: false, idempotent: true },
+  mb_dashboard_filter_remove: { title: 'Remove Dashboard Filter', write: true, destructive: true, idempotent: true },
   mb_dashboard_layout_optimize: { title: 'Optimize Dashboard Layout', write: true, destructive: false, idempotent: true },
   mb_create_parametric_question: { title: 'Create Parametric Question (SQL)', write: true, destructive: false, idempotent: false },
   mb_link_dashboard_filter: { title: 'Link Dashboard Filter', write: true, destructive: false, idempotent: true },
@@ -3136,6 +3138,58 @@ export function getToolDefinitions() {
           }
         },
         required: ['dashboard_id']
+      }
+    },
+    {
+      name: 'mb_dashboard_filter_update',
+      description: 'Update an existing dashboard filter\'s type, name, slug, or default value. Use the parameter_id string from mb_dashboard_get structuredContent.filters[].id. Common use-case: fix a "date/relative" filter that was created as "date/range" (or vice-versa) — this is the underlying cause of 500 errors when a relative-date filter value (e.g. "past13weeks") is sent to a card with a date/range widget-type template tag. Change the filter type to match the widget-type on the cards, or use mb_dashboard_filter_remove + mb_dashboard_add_filter to recreate it with the correct type.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          dashboard_id: {
+            type: 'number',
+            description: 'Dashboard ID'
+          },
+          parameter_id: {
+            type: 'string',
+            description: 'The filter\'s id string (from mb_dashboard_get structuredContent.filters[].id, e.g. "abc1234d")'
+          },
+          type: {
+            type: 'string',
+            enum: ['date/single', 'date/range', 'date/relative', 'date/all-options', 'string/=', 'string/contains', 'number/=', 'number/between', 'category'],
+            description: 'New filter type. Use "date/all-options" to accept both relative ("past13weeks") and absolute date ranges without 500 errors.'
+          },
+          name: {
+            type: 'string',
+            description: 'New display name for the filter (optional)'
+          },
+          slug: {
+            type: 'string',
+            description: 'New URL slug for the filter (optional — usually auto-derived from name)'
+          },
+          default_value: {
+            description: 'New default value, or null to remove the default (optional)'
+          }
+        },
+        required: ['dashboard_id', 'parameter_id']
+      }
+    },
+    {
+      name: 'mb_dashboard_filter_remove',
+      description: 'Remove a filter from a dashboard. Deletes the filter from the dashboard\'s parameters array AND removes all parameter_mappings that reference it from every dashcard. Use this when a filter was created with the wrong type and needs to be recreated: remove it, then call mb_dashboard_add_filter with the correct type, then mb_link_dashboard_filter to re-link the cards. The parameter_id is the filter id string from mb_dashboard_get structuredContent.filters[].id.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          dashboard_id: {
+            type: 'number',
+            description: 'Dashboard ID'
+          },
+          parameter_id: {
+            type: 'string',
+            description: 'The filter\'s id string (from mb_dashboard_get structuredContent.filters[].id)'
+          }
+        },
+        required: ['dashboard_id', 'parameter_id']
       }
     },
     {

@@ -267,6 +267,8 @@ class MetabaseMCPServer {
       case 'mb_dashboard_copy': return await this.cardsHandler.handleDashboardCopy(args);
       case 'mb_metric_create': return await this.cardsHandler.handleCreateMetric(args);
       case 'mb_dashboard_add_filter': return await this.cardsHandler.handleAddDashboardFilter(args);
+      case 'mb_dashboard_filter_update': return await this.cardsHandler.handleDashboardFilterUpdate(args);
+      case 'mb_dashboard_filter_remove': return await this.cardsHandler.handleDashboardFilterRemove(args);
       case 'mb_dashboard_layout_optimize': return await this.cardsHandler.handleOptimizeDashboardLayout(args);
       case 'mb_auto_describe': return await this.cardsHandler.handleAutoDescribe(args);
 

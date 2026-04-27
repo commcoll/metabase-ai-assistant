@@ -737,6 +737,155 @@ export class CardsHandler {
   }
 
 
+  /**
+   * Update an existing dashboard filter's type, name, slug, or default value.
+   * Uses the GET → mutate parameters array → PUT pattern.
+   *
+   * The `parameter_id` is the filter's `id` string (e.g. "abc1234d"), visible in
+   * mb_dashboard_get structuredContent.filters[].id.
+   *
+   * Common use-case: fix the date/relative vs date/range mismatch.
+   * If a filter was created as "date/range" but needs "date/relative" (or vice-versa),
+   * this tool patches the type without touching the card parameter_mappings.
+   */
+  async handleDashboardFilterUpdate(args) {
+    const { dashboard_id, parameter_id, type: newType, name: newName, default_value, slug: newSlug } = args;
+
+    try {
+      const dashboard = await this.metabaseClient.request('GET', `/api/dashboard/${dashboard_id}`);
+      const parameters = dashboard.parameters || [];
+
+      const idx = parameters.findIndex(p => p.id === parameter_id);
+      if (idx === -1) {
+        return {
+          content: [{
+            type: 'text',
+            text: `❌ Filter with id "${parameter_id}" not found on dashboard ${dashboard_id}.\n` +
+              `Available filter IDs: ${parameters.map(p => `${p.id} (${p.name})`).join(', ') || '(none)'}`
+          }]
+        };
+      }
+
+      const original = parameters[idx];
+      const updated = { ...original };
+
+      if (newType !== undefined)     updated.type    = newType;
+      if (newName !== undefined)     updated.name    = newName;
+      if (newSlug !== undefined)     updated.slug    = newSlug;
+      if (default_value !== undefined) {
+        // null means "remove the default"
+        updated.default = default_value === null ? null : default_value;
+      }
+
+      parameters[idx] = updated;
+
+      // Build minimal dashcards for the PUT payload
+      const cards = dashboard.dashcards || dashboard.ordered_cards || [];
+      const minimalDashcards = cards.map(dc => ({
+        id: dc.id,
+        card_id: dc.card_id,
+        row: dc.row,
+        col: dc.col,
+        size_x: dc.size_x,
+        size_y: dc.size_y,
+        series: dc.series || [],
+        parameter_mappings: dc.parameter_mappings || [],
+        visualization_settings: dc.visualization_settings || {}
+      }));
+
+      await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
+        parameters,
+        dashcards: minimalDashcards
+      });
+
+      const changes = [];
+      if (newType !== undefined)     changes.push(`type: ${original.type} → ${newType}`);
+      if (newName !== undefined)     changes.push(`name: "${original.name}" → "${newName}"`);
+      if (newSlug !== undefined)     changes.push(`slug: ${original.slug} → ${newSlug}`);
+      if (default_value !== undefined) changes.push(`default: ${JSON.stringify(original.default)} → ${JSON.stringify(updated.default)}`);
+
+      return {
+        content: [{
+          type: 'text',
+          text: `✅ Filter "${updated.name}" (${parameter_id}) updated on dashboard ${dashboard_id}:\n` +
+            changes.map(c => `  • ${c}`).join('\n')
+        }],
+        structuredContent: { parameter_id, updated }
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `❌ Dashboard filter update error: ${error.message}` }] };
+    }
+  }
+
+
+  /**
+   * Remove a filter from a dashboard.
+   * Removes the parameter from the dashboard's parameters array AND clears
+   * all parameter_mappings that reference it from every dashcard, then PUTs.
+   *
+   * Use this when a filter was created with the wrong type and needs to be
+   * recreated (remove it, then call mb_dashboard_add_filter).
+   */
+  async handleDashboardFilterRemove(args) {
+    const { dashboard_id, parameter_id } = args;
+
+    try {
+      const dashboard = await this.metabaseClient.request('GET', `/api/dashboard/${dashboard_id}`);
+      const parameters = dashboard.parameters || [];
+
+      const target = parameters.find(p => p.id === parameter_id);
+      if (!target) {
+        return {
+          content: [{
+            type: 'text',
+            text: `❌ Filter with id "${parameter_id}" not found on dashboard ${dashboard_id}.\n` +
+              `Available filter IDs: ${parameters.map(p => `${p.id} (${p.name})`).join(', ') || '(none)'}`
+          }]
+        };
+      }
+
+      const updatedParameters = parameters.filter(p => p.id !== parameter_id);
+
+      // Strip parameter_mappings that reference this parameter_id from every dashcard
+      const cards = dashboard.dashcards || dashboard.ordered_cards || [];
+      let mappingsRemoved = 0;
+      const minimalDashcards = cards.map(dc => {
+        const originalMappings = dc.parameter_mappings || [];
+        const filteredMappings = originalMappings.filter(m => m.parameter_id !== parameter_id);
+        mappingsRemoved += (originalMappings.length - filteredMappings.length);
+        return {
+          id: dc.id,
+          card_id: dc.card_id,
+          row: dc.row,
+          col: dc.col,
+          size_x: dc.size_x,
+          size_y: dc.size_y,
+          series: dc.series || [],
+          parameter_mappings: filteredMappings,
+          visualization_settings: dc.visualization_settings || {}
+        };
+      });
+
+      await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
+        parameters: updatedParameters,
+        dashcards: minimalDashcards
+      });
+
+      return {
+        content: [{
+          type: 'text',
+          text: `✅ Filter "${target.name}" (${parameter_id}) removed from dashboard ${dashboard_id}.\n` +
+            `  • Removed ${mappingsRemoved} parameter_mapping(s) from dashcards\n` +
+            `  • Remaining filters: ${updatedParameters.length}\n\n` +
+            `To recreate with a different type, use mb_dashboard_add_filter then mb_link_dashboard_filter.`
+        }]
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `❌ Dashboard filter remove error: ${error.message}` }] };
+    }
+  }
+
+
   async handleDashboardCardRemove(args) {
     const { dashboard_id, card_id } = args;
 
