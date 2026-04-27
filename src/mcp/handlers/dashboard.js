@@ -131,11 +131,11 @@ export async function handleOptimizeDashboardLayout(args, context) {
     const cards = dashboard.dashcards || dashboard.ordered_cards || [];
 
     const layoutStyle = args.layout_style || 'executive';
-    const gridWidth = args.grid_width || 12;
-
-    // Calculate optimized positions on a 24-column grid (Metabase v0.60).
-    // Default: two-column layout, each card 12 wide.
-    const colWidth = Math.floor((gridWidth || 24) / 2);
+    // Metabase v0.60 grid is 24 columns wide (was 12 in older versions).
+    // The schema in tool-registry.js documents default 24, so the handler
+    // matches.  Two-column layout = each card half-grid (12).
+    const gridWidth = args.grid_width || 24;
+    const colWidth = Math.floor(gridWidth / 2);
     const optimizedCards = cards.map((card, index) => {
         const row = Math.floor(index / 2) * 4;
         const col = (index % 2) * colWidth;

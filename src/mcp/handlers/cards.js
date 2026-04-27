@@ -1,6 +1,30 @@
 import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { logger } from '../../utils/logger.js';
 
+/**
+ * Strip read-only fields from a dashcard so it can be safely round-tripped
+ * back through PUT /api/dashboard/:id without Metabase rejecting the payload.
+ *
+ * Preserves ALL other fields (dashboard_tab_id, inline_parameters, action_id,
+ * series, parameter_mappings, visualization_settings, etc.) so they survive
+ * dashboard-level mutations (filter add/remove, card move, viz refresh).
+ *
+ * Earlier attempts at a "minimal" dashcard whitelisted only id/card_id/row/
+ * col/size_x/size_y/series/parameter_mappings/visualization_settings, which
+ * silently stripped any extra fields — destructive on tabbed dashboards.
+ */
+function toMinimalDashcard(dc) {
+  const {
+    card,            // nested read-only card object from GET
+    created_at,      // server-managed timestamp
+    updated_at,      // server-managed timestamp
+    entity_id,       // server-managed
+    collection_authority_level, // server-managed
+    ...keep
+  } = dc;
+  return keep;
+}
+
 export class CardsHandler {
   constructor(metabaseClient) {
     this.metabaseClient = metabaseClient;
@@ -145,10 +169,32 @@ export class CardsHandler {
       const applied = [];
       const notFound = [];
 
+      // Maps patch-arg keys (snake_case as exposed in the MCP schema) to the
+      // Metabase storage keys (kebab-case for some fields, plus the synthetic
+      // dimension-array binding for field_id).
+      const PATCH_KEY_TO_STORAGE_KEY = {
+        widget_type: 'widget-type',
+        display_name: 'display-name',
+        type: 'type',
+        default: 'default',
+        field_id: 'dimension',
+      };
+
+      const noopPatches = [];
+
       for (const patch of patches) {
         const tag = tags[patch.tag_name];
         if (!tag) {
           notFound.push(patch.tag_name);
+          continue;
+        }
+
+        // Detect no-op patches early — schema only requires tag_name, so a
+        // patch with only that key would otherwise pass through and produce
+        // a misleading "applied" line.
+        const patchKeys = Object.keys(patch).filter(k => k !== 'tag_name');
+        if (patchKeys.length === 0) {
+          noopPatches.push(patch.tag_name);
           continue;
         }
 
@@ -161,10 +207,14 @@ export class CardsHandler {
         // dimension binding: ["field", field_id, null]
         if (patch.field_id !== undefined)     tag.dimension        = ['field', patch.field_id, null];
 
-        const changes = Object.entries(patch)
-          .filter(([k]) => k !== 'tag_name')
-          .map(([k, v]) => `${k}: ${JSON.stringify(before[k === 'widget_type' ? 'widget-type' : k === 'display_name' ? 'display-name' : k])} → ${JSON.stringify(v)}`)
-          .join(', ');
+        // Build a precise before→after diff using the correct storage key for
+        // each patch arg.  field_id reads/writes the `dimension` array.
+        const changes = patchKeys.map((k) => {
+          const storageKey = PATCH_KEY_TO_STORAGE_KEY[k] || k;
+          const beforeVal = before[storageKey];
+          const afterVal = (k === 'field_id') ? ['field', patch[k], null] : patch[k];
+          return `${k}: ${JSON.stringify(beforeVal)} → ${JSON.stringify(afterVal)}`;
+        }).join(', ');
 
         applied.push(`  "${patch.tag_name}": ${changes}`);
       }
@@ -175,20 +225,33 @@ export class CardsHandler {
             type: 'text',
             text: `⚠️ No patches applied.\n` +
               (notFound.length ? `  Tags not found: ${notFound.join(', ')}\n` : '') +
+              (noopPatches.length ? `  Empty patches (no fields to change): ${noopPatches.join(', ')}\n` : '') +
               `  Available tags: ${Object.keys(tags).join(', ')}`
           }]
         };
       }
 
-      // PUT back the full dataset_query with modified tags
+      // PUT back the WHOLE card body with the modified dataset_query.  Sending
+      // only {dataset_query} is symmetric to the bug we hit in v0.60 with
+      // {visualization_settings}-only PUTs (Metabase treats absent required
+      // fields as null and silently corrupts the card).  Including all
+      // top-level fields from the GET makes the PUT idempotent.
       const updatedDatasetQuery = {
         ...card.dataset_query,
         native: { ...nativeQuery, 'template-tags': tags }
       };
 
-      await this.metabaseClient.request('PUT', `/api/card/${card_id}`, {
-        dataset_query: updatedDatasetQuery
-      });
+      // Strip server-managed read-only fields that Metabase rejects on PUT.
+      const {
+        creator, creator_id, can_write, last_query_start, average_query_time,
+        result_metadata, // recomputed by Metabase on next query
+        created_at, updated_at, entity_id, public_uuid,
+        view_count, last_used_at,
+        ...putBody
+      } = card;
+      putBody.dataset_query = updatedDatasetQuery;
+
+      await this.metabaseClient.request('PUT', `/api/card/${card_id}`, putBody);
 
       return {
         content: [{
@@ -730,16 +793,14 @@ export class CardsHandler {
         return { content: [{ type: 'text', text: `❌ Dashcard ${card_id} not found on dashboard ${dashboard_id}` }] };
       }
 
-      // Build the minimal dashcard payload, applying only the requested updates.
+      // Build the updated dashcard preserving ALL original fields (tabs, etc.)
+      // and applying only the requested mutations.
       const updatedCard = {
-        id: cardToUpdate.id,
-        card_id: cardToUpdate.card_id,
+        ...toMinimalDashcard(cardToUpdate),
         row: row !== undefined ? row : cardToUpdate.row,
         col: col !== undefined ? col : cardToUpdate.col,
         size_x: size_x !== undefined ? size_x : cardToUpdate.size_x,
         size_y: size_y !== undefined ? size_y : cardToUpdate.size_y,
-        series: cardToUpdate.series || [],
-        parameter_mappings: cardToUpdate.parameter_mappings || [],
         // Merge dashcard-level visualization_settings (empty = inherit from question).
         // Setting specific keys here overrides the question's settings for this dashcard only.
         visualization_settings: visualization_settings !== undefined
@@ -747,21 +808,10 @@ export class CardsHandler {
           : (cardToUpdate.visualization_settings || {})
       };
 
-      // Use minimal format for all other cards too (strip nested card objects).
-      const minimalDashcards = cards.map(c => {
-        if (c.id === card_id) return updatedCard;
-        return {
-          id: c.id,
-          card_id: c.card_id,
-          row: c.row,
-          col: c.col,
-          size_x: c.size_x,
-          size_y: c.size_y,
-          series: c.series || [],
-          parameter_mappings: c.parameter_mappings || [],
-          visualization_settings: c.visualization_settings || {}
-        };
-      });
+      // Strip read-only fields from every other dashcard but preserve their data.
+      const minimalDashcards = cards.map(c =>
+        c.id === card_id ? updatedCard : toMinimalDashcard(c)
+      );
 
       await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
         dashcards: minimalDashcards
@@ -802,38 +852,46 @@ export class CardsHandler {
       const updated = [];
       const skipped = [];
 
-      // Fetch each linked question and copy its visualization settings to the dashcard.
-      for (const dc of targets) {
-        if (!dc.card_id) { skipped.push(`dashcard ${dc.id} (no linked question)`); continue; }
+      // Fetch each linked question's viz settings IN PARALLEL.  Sequential
+      // GETs would N+1 on big dashboards and could exceed MCP transport
+      // tolerance.  Promise.all caps wall-time at the slowest single GET.
+      const questionResults = await Promise.all(targets.map(async (dc) => {
+        if (!dc.card_id) return { dc, error: 'no linked question' };
         try {
           const question = await this.metabaseClient.request('GET', `/api/card/${dc.card_id}`);
-          if (!question.visualization_settings || Object.keys(question.visualization_settings).length === 0) {
-            skipped.push(`dashcard ${dc.id} "${question.name}" (question has no viz settings)`);
-            continue;
-          }
-          dc.visualization_settings = { ...question.visualization_settings };
-          updated.push(`dashcard ${dc.id} "${question.name}"`);
+          return { dc, question };
         } catch (e) {
-          skipped.push(`dashcard ${dc.id} (error: ${e.message})`);
+          return { dc, error: e.message };
         }
+      }));
+
+      for (const { dc, question, error } of questionResults) {
+        if (error) {
+          skipped.push(`dashcard ${dc.id} (${error})`);
+          continue;
+        }
+        if (!question.visualization_settings || Object.keys(question.visualization_settings).length === 0) {
+          skipped.push(`dashcard ${dc.id} "${question.name}" (question has no viz settings)`);
+          continue;
+        }
+        // MERGE question viz onto dashcard viz — dashcard-level overrides
+        // (e.g. card.title set per-dashboard) take precedence over the
+        // question's defaults.  Question keys NOT already present on the
+        // dashcard fill in.  This matches Metabase's own dashcard inheritance
+        // model and avoids destroying intentional per-dashboard tweaks.
+        dc.visualization_settings = {
+          ...(question.visualization_settings || {}),
+          ...(dc.visualization_settings || {})
+        };
+        updated.push(`dashcard ${dc.id} "${question.name}"`);
       }
 
       if (updated.length === 0) {
         return { content: [{ type: 'text', text: `⚠️ Nothing to update.\n${skipped.map(s => '  skipped: ' + s).join('\n')}` }] };
       }
 
-      // PUT the dashboard with refreshed dashcard settings (minimal format).
-      const minimalDashcards = cards.map(dc => ({
-        id: dc.id,
-        card_id: dc.card_id,
-        row: dc.row,
-        col: dc.col,
-        size_x: dc.size_x,
-        size_y: dc.size_y,
-        series: dc.series || [],
-        parameter_mappings: dc.parameter_mappings || [],
-        visualization_settings: dc.visualization_settings || {}
-      }));
+      // PUT the dashboard with all dashcards (preserving tabs, inline params, etc.).
+      const minimalDashcards = cards.map(toMinimalDashcard);
 
       await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
         dashcards: minimalDashcards
@@ -895,19 +953,11 @@ export class CardsHandler {
 
       parameters[idx] = updated;
 
-      // Build minimal dashcards for the PUT payload
+      // PUT the updated parameters with all dashcards intact (preserve tabs,
+      // inline params, action_id, etc. — toMinimalDashcard only strips
+      // server-managed read-only fields).
       const cards = dashboard.dashcards || dashboard.ordered_cards || [];
-      const minimalDashcards = cards.map(dc => ({
-        id: dc.id,
-        card_id: dc.card_id,
-        row: dc.row,
-        col: dc.col,
-        size_x: dc.size_x,
-        size_y: dc.size_y,
-        series: dc.series || [],
-        parameter_mappings: dc.parameter_mappings || [],
-        visualization_settings: dc.visualization_settings || {}
-      }));
+      const minimalDashcards = cards.map(toMinimalDashcard);
 
       await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
         parameters,
@@ -962,7 +1012,9 @@ export class CardsHandler {
 
       const updatedParameters = parameters.filter(p => p.id !== parameter_id);
 
-      // Strip parameter_mappings that reference this parameter_id from every dashcard
+      // Strip parameter_mappings that reference this parameter_id from every
+      // dashcard while preserving every other dashcard field (tabs, inline
+      // params, action_id, etc.).
       const cards = dashboard.dashcards || dashboard.ordered_cards || [];
       let mappingsRemoved = 0;
       const minimalDashcards = cards.map(dc => {
@@ -970,15 +1022,8 @@ export class CardsHandler {
         const filteredMappings = originalMappings.filter(m => m.parameter_id !== parameter_id);
         mappingsRemoved += (originalMappings.length - filteredMappings.length);
         return {
-          id: dc.id,
-          card_id: dc.card_id,
-          row: dc.row,
-          col: dc.col,
-          size_x: dc.size_x,
-          size_y: dc.size_y,
-          series: dc.series || [],
-          parameter_mappings: filteredMappings,
-          visualization_settings: dc.visualization_settings || {}
+          ...toMinimalDashcard(dc),
+          parameter_mappings: filteredMappings
         };
       });
 
@@ -1019,8 +1064,14 @@ export class CardsHandler {
 
       const filteredCards = cards.filter(c => c.id !== card_id);
 
+      // Strip read-only fields from each remaining dashcard before PUT.
+      // The raw cards from GET include nested `card` objects that Metabase
+      // rejects on PUT (read-only); toMinimalDashcard removes those while
+      // preserving tabs, inline_parameters, action_id, etc.
+      const dashcardsToPut = filteredCards.map(toMinimalDashcard);
+
       await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
-        dashcards: filteredCards
+        dashcards: dashcardsToPut
       });
 
       const remaining = filteredCards.map(c =>
