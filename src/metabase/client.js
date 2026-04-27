@@ -354,6 +354,21 @@ export class MetabaseClient {
           // which doesn't overlap with widget-type values — earlier code conflated
           // them, producing tags like widget-type:"date" that crashed Metabase.
           tag["widget-type"] = param.widget_type || "date/all-options";
+
+          // Optional: substitute the field-filter using a custom table+column
+          // alias instead of the catalog table name.  Required workaround for
+          // tables whose names contain spaces or special chars (ERPnext's
+          // `tabGL Entry`, `tabSales Invoice`, etc.) — Metabase's MariaDB
+          // driver mis-quotes those when generating the WHERE clause and
+          // emits SQL like `tabGL Entry.posting_date` (single backquoted
+          // identifier with a dot inside) which MariaDB rejects with
+          // "Unknown column".  Workaround: alias the table in the SQL
+          // (`FROM \`tabGL Entry\` AS gl_entry`) and set param.alias to
+          // "gl_entry.posting_date".  Metabase will substitute the field
+          // filter using that alias, producing valid SQL.
+          if (param.alias) {
+            tag.alias = param.alias;
+          }
         } else {
           // Plain variable substitution (text, number, date, category, etc.)
           tag.type = param.type || "text";

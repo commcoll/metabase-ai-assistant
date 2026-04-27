@@ -755,6 +755,10 @@ export function getToolDefinitions() {
                   enum: ['date/all-options', 'date/range', 'date/single', 'date/month-year', 'date/quarter-year', 'string/=', 'string/contains', 'number/=', 'number/between', 'category'],
                   description: 'Widget type for field-filter parameters (field_id required). Controls which picker is shown AND which value formats Metabase will accept at the card level. **For date dimensions, prefer "date/all-options"** — it accepts both absolute date ranges AND relative strings (past13weeks, thismonth, etc.). "date/range" rejects relative strings with a 500 when a dashboard filter default like "past13weeks" is passed in. Defaults to "date/all-options" when omitted (the safe choice for any dimension).'
                 },
+                alias: {
+                  type: 'string',
+                  description: 'Override the SQL identifier Metabase generates when substituting this field-filter. Format: "table_alias.column_name". **Required for tables whose names contain spaces or special chars** (ERPnext: `tabGL Entry`, `tabSales Invoice`, etc.) — Metabase\'s MariaDB driver mis-quotes those, generating SQL like `tabGL Entry.posting_date` (one identifier with a dot inside) which MariaDB rejects. Workaround: alias the table in your SQL ("FROM `tabGL Entry` AS gl_entry") and set alias to "gl_entry.posting_date". Metabase substitutes the field filter using your alias, producing valid SQL. Field-filter still works the same way for the user — they get the rich relative-date picker.'
+                },
                 default_value: {
                   type: 'string',
                   description: 'Default value (optional)'
@@ -3041,6 +3045,10 @@ export function getToolDefinitions() {
                 field_id: {
                   type: 'number',
                   description: 'Rebind the dimension to a different field ID'
+                },
+                alias: {
+                  type: 'string',
+                  description: 'Set the SQL alias used when substituting this field-filter. Format: "table_alias.column_name". Use to fix the ERPnext-tables-with-spaces SQL bug — alias the table in the SQL ("FROM `tabGL Entry` AS gl_entry") and set alias to "gl_entry.posting_date". Pass empty string to clear an existing alias.'
                 },
                 default: {
                   description: 'New default value for the tag (null to remove)'

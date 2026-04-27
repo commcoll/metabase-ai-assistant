@@ -25,6 +25,98 @@ function toMinimalDashcard(dc) {
   return keep;
 }
 
+/**
+ * Strip server-managed read-only fields from a card object so it can be
+ * round-tripped back through PUT /api/card/:id without Metabase rejecting
+ * the payload or re-using stale data.
+ *
+ * Uses an explicit deny-list because some keys (e.g. "last-edit-info") are
+ * kebab-case and can't be destructured.  Mutates a shallow copy.
+ *
+ * Updated for Metabase v0.60: the GET response carries many newer fields
+ * (cache_invalidated_at, dashboard_count, can_*, etc.) that didn't exist
+ * in earlier versions and that Metabase will either reject or silently
+ * misuse on PUT.
+ */
+const READ_ONLY_CARD_FIELDS = new Set([
+  // Server timestamps / identifiers
+  'created_at', 'updated_at', 'entity_id', 'public_uuid',
+  'cache_invalidated_at', 'last_query_start', 'last_used_at',
+  'initially_published_at',
+  // Computed / derived
+  'result_metadata',         // Metabase recomputes on next query
+  'average_query_time', 'view_count',
+  'parameter_usage_count', 'dashboard_count',
+  // Permission flags (read-only assertions about the caller)
+  'can_write', 'can_delete', 'can_manage_db', 'can_restore',
+  'can_run_adhoc_query',
+  // Creator info (set by Metabase from the auth context)
+  'creator', 'creator_id', 'made_public_by_id',
+  // Embedded sub-objects we should never round-trip
+  'last-edit-info',          // kebab-case
+  'moderation_reviews',
+  'collection',              // nested collection object
+  'dashboard',               // nested dashboard object
+  // v0.60 server-side metadata
+  'archived_directly', 'is_remote_synced', 'metabase_version',
+  'dimension_mappings', 'dimensions', 'param_fields',
+  'legacy_query', 'card_schema', 'document_id',
+  'collection_authority_level', 'collection_preview',
+]);
+
+function stripReadOnlyCardFields(card) {
+  const out = { ...card };
+  for (const key of READ_ONLY_CARD_FIELDS) {
+    delete out[key];
+  }
+  return out;
+}
+
+/**
+ * Find template tags inside a card's dataset_query, regardless of which shape
+ * Metabase used to return it.  Returns the tags object (or null), AND a back-
+ * pointer so callers can mutate in place and have the change propagate to the
+ * card.
+ *
+ * Shapes:
+ *   - Legacy (pre-v0.60, also accepted on POST/PUT):
+ *       dataset_query: { type: 'native', native: { query, "template-tags": {...} } }
+ *   - MLv2 (v0.60 GET response):
+ *       dataset_query: { lib/type: 'mbql/query', database, stages: [
+ *         { lib/type: 'mbql.stage/native', native: <sql string>, "template-tags": {...} }
+ *       ] }
+ */
+function locateTemplateTags(dataset_query) {
+  if (!dataset_query || typeof dataset_query !== 'object') {
+    return { tags: null, container: null, shape: 'missing' };
+  }
+  if (dataset_query.native && typeof dataset_query.native === 'object'
+      && dataset_query.native['template-tags']) {
+    return {
+      tags: dataset_query.native['template-tags'],
+      container: dataset_query.native,
+      shape: 'legacy',
+    };
+  }
+  if (Array.isArray(dataset_query.stages)) {
+    for (const stage of dataset_query.stages) {
+      if (stage && stage['lib/type'] === 'mbql.stage/native' && stage['template-tags']) {
+        return {
+          tags: stage['template-tags'],
+          container: stage,
+          shape: 'mlv2',
+        };
+      }
+    }
+  }
+  return { tags: null, container: null, shape: 'no-native-stage' };
+}
+
+/** Convenience: just the tags object, or null. */
+function extractTemplateTags(dataset_query) {
+  return locateTemplateTags(dataset_query).tags;
+}
+
 export class CardsHandler {
   constructor(metabaseClient) {
     this.metabaseClient = metabaseClient;
@@ -107,13 +199,18 @@ export class CardsHandler {
         return { content: [{ type: 'text', text: `❌ mb_card_get: GET /api/card/${card_id} returned ${card === null ? 'null' : typeof card}` }] };
       }
 
-      // Extract template tags for native SQL cards — critical for diagnosing
-      // filter type mismatches (e.g. widget-type: date/range vs date/all-options)
-      const templateTags = card.dataset_query?.native?.['template-tags'] || null;
+      // Extract template tags from BOTH dataset_query shapes:
+      //   1. Legacy:  dataset_query.native["template-tags"]
+      //   2. MLv2  :  dataset_query.stages[<i>]["template-tags"]  (Metabase v0.60)
+      // Critical for diagnosing filter type mismatches (e.g. widget-type:
+      // date/range vs date/all-options) and the ERPnext-table-with-spaces
+      // SQL bug (where setting tag.alias is the workaround).
+      const templateTags = extractTemplateTags(card.dataset_query);
       const tagSummary = templateTags
         ? Object.entries(templateTags).map(([k, t]) =>
             `  tag "${k}": type=${t.type}, widget-type=${t['widget-type'] || '(none)'}` +
-            (t.dimension ? `, dimension=${JSON.stringify(t.dimension)}` : '')
+            (t.dimension ? `, dimension=${JSON.stringify(t.dimension)}` : '') +
+            (t.alias ? `, alias=${JSON.stringify(t.alias)}` : '')
           ).join('\n')
         : null;
 
@@ -172,15 +269,21 @@ export class CardsHandler {
 
     try {
       const card = await this.metabaseClient.request('GET', `/api/card/${card_id}`);
-      const nativeQuery = card.dataset_query?.native;
 
-      if (!nativeQuery) {
-        return { content: [{ type: 'text', text: `❌ Card ${card_id} is not a native SQL card (no native query found)` }] };
-      }
+      // Locate template tags across BOTH dataset_query shapes (legacy + MLv2).
+      // Metabase v0.60 stores cards in MLv2 internally and returns them in
+      // MLv2 shape from GET /api/card/:id, but accepts the legacy shape on
+      // POST/PUT.  Earlier versions of this handler only checked the legacy
+      // location and reported "no native query found" on every v0.60 card.
+      const located = locateTemplateTags(card.dataset_query);
+      const { tags, container: nativeStage, shape } = located;
 
-      const tags = nativeQuery['template-tags'];
       if (!tags) {
-        return { content: [{ type: 'text', text: `❌ Card ${card_id} has no template tags` }] };
+        return { content: [{ type: 'text', text:
+          `❌ Card ${card_id} has no template tags (dataset_query shape: ${shape}). ` +
+          `Card type: ${card.query_type || card.type || 'unknown'}, ` +
+          `dataset_query keys: ${Object.keys(card.dataset_query || {}).join(',') || 'none'}`
+        }] };
       }
 
       const applied = [];
@@ -195,6 +298,7 @@ export class CardsHandler {
         type: 'type',
         default: 'default',
         field_id: 'dimension',
+        alias: 'alias',
       };
 
       const noopPatches = [];
@@ -223,6 +327,10 @@ export class CardsHandler {
         if (patch.default !== undefined)      tag.default          = patch.default;
         // dimension binding: ["field", field_id, null]
         if (patch.field_id !== undefined)     tag.dimension        = ['field', patch.field_id, null];
+        // Field-filter alias — overrides the SQL identifier Metabase generates
+        // when substituting {{tag_name}}.  Workaround for ERPnext-style table
+        // names with spaces.  Setting alias to "" or null clears any previous.
+        if (patch.alias !== undefined)        tag.alias            = patch.alias || undefined;
 
         // Build a precise before→after diff using the correct storage key for
         // each patch arg.  field_id reads/writes the `dimension` array.
@@ -248,25 +356,25 @@ export class CardsHandler {
         };
       }
 
-      // PUT back the WHOLE card body with the modified dataset_query.  Sending
-      // only {dataset_query} is symmetric to the bug we hit in v0.60 with
-      // {visualization_settings}-only PUTs (Metabase treats absent required
-      // fields as null and silently corrupts the card).  Including all
-      // top-level fields from the GET makes the PUT idempotent.
-      const updatedDatasetQuery = {
-        ...card.dataset_query,
-        native: { ...nativeQuery, 'template-tags': tags }
-      };
+      // Write tags back into whichever shape we found them.  We mutated the
+      // tag objects in place above (tag is a reference into `tags`, which is
+      // a reference into `nativeStage['template-tags']`), so the underlying
+      // `card.dataset_query` already reflects all patches.  No reconstruction
+      // needed — just send the dataset_query as-is.
+      //
+      // Sanity assertion to make this contract explicit:
+      if (nativeStage['template-tags'] !== tags) {
+        // This should never happen — would indicate the stage object was
+        // copied somewhere along the way and our mutations didn't propagate.
+        nativeStage['template-tags'] = tags;
+      }
 
-      // Strip server-managed read-only fields that Metabase rejects on PUT.
-      const {
-        creator, creator_id, can_write, last_query_start, average_query_time,
-        result_metadata, // recomputed by Metabase on next query
-        created_at, updated_at, entity_id, public_uuid,
-        view_count, last_used_at,
-        ...putBody
-      } = card;
-      putBody.dataset_query = updatedDatasetQuery;
+      // PUT back the WHOLE card body.  Sending only {dataset_query} is
+      // symmetric to the v0.60 silent-corruption bug we hit with
+      // {visualization_settings}-only PUTs (Metabase treats absent required
+      // fields as null).  Including all top-level fields from the GET makes
+      // the PUT idempotent.
+      const putBody = stripReadOnlyCardFields(card);
 
       await this.metabaseClient.request('PUT', `/api/card/${card_id}`, putBody);
 
