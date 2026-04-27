@@ -73,6 +73,88 @@ function stripReadOnlyCardFields(card) {
 }
 
 /**
+ * Safely round-trip a card through PUT /api/card/:id, applying a mutator to
+ * the freshly-GETted card body and verifying nothing was silently corrupted.
+ *
+ * Why this helper exists: Metabase v0.60 has a silent-corruption bug where
+ * a PUT with a partial card body (or a dataset_query in the wrong shape)
+ * returns HTTP 200 but stores a card with empty/null dataset_query.  We
+ * verified this empirically against the live instance: PUTing only
+ * {visualization_settings: ...} or PUTing a legacy {type:'native', ...}
+ * dataset_query both produce 200 OK with corrupted persistence.
+ *
+ * Pattern:
+ *   1. GET the card to capture its current state (especially dataset_query).
+ *   2. Apply caller's `mutate(card)` — mutates the card in place.
+ *   3. Strip server-managed read-only fields.
+ *   4. PUT the full body.
+ *   5. Verify the response still has a non-empty dataset_query.  If not,
+ *      restore from the pre-PUT snapshot and surface a clear error to the
+ *      caller — the corruption is detected immediately, not weeks later.
+ *
+ * Returns { ok: true, card: <updated> } on success, or
+ * { ok: false, error: <string>, restored: <bool> } on detected corruption.
+ */
+async function safePutCard(metabaseClient, card_id, mutate) {
+  let original;
+  try {
+    original = await metabaseClient.request('GET', `/api/card/${card_id}`);
+  } catch (e) {
+    return { ok: false, error: `pre-PUT GET failed: ${e.message}`, restored: false };
+  }
+
+  if (!original || typeof original !== 'object') {
+    return { ok: false, error: `pre-PUT GET returned ${original === null ? 'null' : typeof original}`, restored: false };
+  }
+
+  // Snapshot of the original dataset_query — used for both the corruption
+  // check and the restore-on-corruption path.
+  const originalDatasetQueryJson = JSON.stringify(original.dataset_query || null);
+  const originalHadDatasetQuery = !!(original.dataset_query
+    && Object.keys(original.dataset_query).length > 0);
+
+  // Make a working copy so mutate() doesn't accidentally affect the snapshot.
+  const working = JSON.parse(JSON.stringify(original));
+  try {
+    await mutate(working);
+  } catch (e) {
+    return { ok: false, error: `mutator threw: ${e.message}`, restored: false };
+  }
+
+  const putBody = stripReadOnlyCardFields(working);
+
+  let putResponse;
+  try {
+    putResponse = await metabaseClient.request('PUT', `/api/card/${card_id}`, putBody);
+  } catch (e) {
+    return { ok: false, error: `PUT failed: ${e.message}`, restored: false };
+  }
+
+  // Corruption check: did the PUT silently zero the dataset_query?
+  const respDQ = putResponse && putResponse.dataset_query;
+  const respHasDQ = !!(respDQ && Object.keys(respDQ).length > 0);
+
+  if (originalHadDatasetQuery && !respHasDQ) {
+    // Silent corruption.  Restore from the snapshot.
+    let restored = false;
+    try {
+      const restoreBody = stripReadOnlyCardFields(original);
+      await metabaseClient.request('PUT', `/api/card/${card_id}`, restoreBody);
+      restored = true;
+    } catch (restoreErr) {
+      logger.error(`safePutCard: restore PUT failed for card ${card_id}: ${restoreErr.message}`);
+    }
+    return {
+      ok: false,
+      error: `Metabase v0.60 silent-corruption detected: PUT returned 200 but dataset_query is empty in the response. ${restored ? 'Card was restored from snapshot.' : 'RESTORE FAILED — card may be in a corrupted state.'}`,
+      restored,
+    };
+  }
+
+  return { ok: true, card: putResponse };
+}
+
+/**
  * Find template tags inside a card's dataset_query, regardless of which shape
  * Metabase used to return it.  Returns the tags object (or null), AND a back-
  * pointer so callers can mutate in place and have the change propagate to the
@@ -338,21 +420,17 @@ export class CardsHandler {
     const { card_id, patches } = args;
 
     try {
-      const card = await this.metabaseClient.request('GET', `/api/card/${card_id}`);
+      // Pre-flight: GET to validate the card has template tags before we even
+      // start the safePutCard round-trip.  This way the "no template tags"
+      // error path returns fast without any write.
+      const probeCard = await this.metabaseClient.request('GET', `/api/card/${card_id}`);
+      const probeLocated = locateTemplateTags(probeCard.dataset_query);
 
-      // Locate template tags across BOTH dataset_query shapes (legacy + MLv2).
-      // Metabase v0.60 stores cards in MLv2 internally and returns them in
-      // MLv2 shape from GET /api/card/:id, but accepts the legacy shape on
-      // POST/PUT.  Earlier versions of this handler only checked the legacy
-      // location and reported "no native query found" on every v0.60 card.
-      const located = locateTemplateTags(card.dataset_query);
-      const { tags, container: nativeStage, shape } = located;
-
-      if (!tags) {
+      if (!probeLocated.tags) {
         return { content: [{ type: 'text', text:
-          `❌ Card ${card_id} has no template tags (dataset_query shape: ${shape}). ` +
-          `Card type: ${card.query_type || card.type || 'unknown'}, ` +
-          `dataset_query keys: ${Object.keys(card.dataset_query || {}).join(',') || 'none'}`
+          `❌ Card ${card_id} has no template tags (dataset_query shape: ${probeLocated.shape}). ` +
+          `Card type: ${probeCard.query_type || probeCard.type || 'unknown'}, ` +
+          `dataset_query keys: ${Object.keys(probeCard.dataset_query || {}).join(',') || 'none'}`
         }] };
       }
 
@@ -373,45 +451,19 @@ export class CardsHandler {
 
       const noopPatches = [];
 
+      // Validate patches against the probe tags so we can return early
+      // before any write if everything is no-op or missing.
       for (const patch of patches) {
-        const tag = tags[patch.tag_name];
-        if (!tag) {
+        if (!probeLocated.tags[patch.tag_name]) {
           notFound.push(patch.tag_name);
           continue;
         }
-
-        // Detect no-op patches early — schema only requires tag_name, so a
-        // patch with only that key would otherwise pass through and produce
-        // a misleading "applied" line.
         const patchKeys = Object.keys(patch).filter(k => k !== 'tag_name');
         if (patchKeys.length === 0) {
           noopPatches.push(patch.tag_name);
           continue;
         }
-
-        const before = { ...tag };
-
-        if (patch.widget_type !== undefined)  tag['widget-type']   = patch.widget_type;
-        if (patch.display_name !== undefined) tag['display-name']  = patch.display_name;
-        if (patch.type !== undefined)         tag.type             = patch.type;
-        if (patch.default !== undefined)      tag.default          = patch.default;
-        // dimension binding: ["field", field_id, null]
-        if (patch.field_id !== undefined)     tag.dimension        = ['field', patch.field_id, null];
-        // Field-filter alias — overrides the SQL identifier Metabase generates
-        // when substituting {{tag_name}}.  Workaround for ERPnext-style table
-        // names with spaces.  Setting alias to "" or null clears any previous.
-        if (patch.alias !== undefined)        tag.alias            = patch.alias || undefined;
-
-        // Build a precise before→after diff using the correct storage key for
-        // each patch arg.  field_id reads/writes the `dimension` array.
-        const changes = patchKeys.map((k) => {
-          const storageKey = PATCH_KEY_TO_STORAGE_KEY[k] || k;
-          const beforeVal = before[storageKey];
-          const afterVal = (k === 'field_id') ? ['field', patch[k], null] : patch[k];
-          return `${k}: ${JSON.stringify(beforeVal)} → ${JSON.stringify(afterVal)}`;
-        }).join(', ');
-
-        applied.push(`  "${patch.tag_name}": ${changes}`);
+        applied.push(patch.tag_name); // placeholder; we'll replace with diff below
       }
 
       if (applied.length === 0) {
@@ -421,43 +473,68 @@ export class CardsHandler {
             text: `⚠️ No patches applied.\n` +
               (notFound.length ? `  Tags not found: ${notFound.join(', ')}\n` : '') +
               (noopPatches.length ? `  Empty patches (no fields to change): ${noopPatches.join(', ')}\n` : '') +
-              `  Available tags: ${Object.keys(tags).join(', ')}`
+              `  Available tags: ${Object.keys(probeLocated.tags).join(', ')}`
           }]
         };
       }
 
-      // Write tags back into whichever shape we found them.  We mutated the
-      // tag objects in place above (tag is a reference into `tags`, which is
-      // a reference into `nativeStage['template-tags']`), so the underlying
-      // `card.dataset_query` already reflects all patches.  No reconstruction
-      // needed — just send the dataset_query as-is.
-      //
-      // Sanity assertion to make this contract explicit:
-      if (nativeStage['template-tags'] !== tags) {
-        // This should never happen — would indicate the stage object was
-        // copied somewhere along the way and our mutations didn't propagate.
-        nativeStage['template-tags'] = tags;
+      // Reset applied; the safePutCard mutator will repopulate with real diffs.
+      applied.length = 0;
+
+      // safePutCard does GET → mutate → strip → PUT → verify.  The mutator
+      // operates on a fresh deep-copy of the card; we re-locate the tags in
+      // that copy and apply each patch in place.  safePutCard then verifies
+      // the response still has a populated dataset_query — if Metabase v0.60
+      // silent-corrupts on the PUT (returns 200 with empty dataset_query),
+      // the snapshot is restored automatically.
+      const result = await safePutCard(this.metabaseClient, card_id, async (workingCard) => {
+        const located = locateTemplateTags(workingCard.dataset_query);
+        if (!located.tags) {
+          throw new Error(`tags vanished between probe and mutate (race? deletion?)`);
+        }
+        const tags = located.tags;
+
+        for (const patch of patches) {
+          const tag = tags[patch.tag_name];
+          if (!tag) continue; // already counted in notFound
+          const patchKeys = Object.keys(patch).filter(k => k !== 'tag_name');
+          if (patchKeys.length === 0) continue; // already counted in noopPatches
+
+          const before = { ...tag };
+          if (patch.widget_type !== undefined)  tag['widget-type']   = patch.widget_type;
+          if (patch.display_name !== undefined) tag['display-name']  = patch.display_name;
+          if (patch.type !== undefined)         tag.type             = patch.type;
+          if (patch.default !== undefined)      tag.default          = patch.default;
+          if (patch.field_id !== undefined)     tag.dimension        = ['field', patch.field_id, null];
+          if (patch.alias !== undefined)        tag.alias            = patch.alias || undefined;
+
+          const changes = patchKeys.map((k) => {
+            const storageKey = PATCH_KEY_TO_STORAGE_KEY[k] || k;
+            const beforeVal = before[storageKey];
+            const afterVal = (k === 'field_id') ? ['field', patch[k], null] : patch[k];
+            return `${k}: ${JSON.stringify(beforeVal)} → ${JSON.stringify(afterVal)}`;
+          }).join(', ');
+          applied.push(`  "${patch.tag_name}": ${changes}`);
+        }
+      });
+
+      if (!result.ok) {
+        return { content: [{ type: 'text', text:
+          `❌ Card patch template tags failed: ${result.error}` +
+          (result.restored === false ? '' : ` (restored=${result.restored})`)
+        }] };
       }
-
-      // PUT back the WHOLE card body.  Sending only {dataset_query} is
-      // symmetric to the v0.60 silent-corruption bug we hit with
-      // {visualization_settings}-only PUTs (Metabase treats absent required
-      // fields as null).  Including all top-level fields from the GET makes
-      // the PUT idempotent.
-      const putBody = stripReadOnlyCardFields(card);
-
-      await this.metabaseClient.request('PUT', `/api/card/${card_id}`, putBody);
 
       return {
         content: [{
           type: 'text',
-          text: `✅ Patched template tags on card ${card_id} "${card.name}":\n` +
+          text: `✅ Patched template tags on card ${card_id} "${probeCard.name}":\n` +
             applied.join('\n') +
             (notFound.length ? `\n⚠️  Tags not found (skipped): ${notFound.join(', ')}` : '')
         }],
         structuredContent: {
           card_id,
-          card_name: card.name,
+          card_name: probeCard.name,
           applied: applied.length,
           skipped: notFound
         }
@@ -472,13 +549,54 @@ export class CardsHandler {
     const { card_id, ...updates } = args;
 
     try {
-      const card = await this.metabaseClient.request('PUT', `/api/card/${card_id}`, updates);
+      // Metabase v0.60 silent-corruption bug: PUT /api/card/:id with a partial
+      // body silently zeroes other fields (e.g. PUT {visualization_settings:
+      // {...}} returns 200 but stores empty dataset_query).  Verified
+      // empirically — see safePutCard for details.  Pattern: GET, merge, PUT,
+      // verify-or-restore.
+      //
+      // Special case: if the only update is `archived`, the partial PUT is
+      // safe (verified by Metabase devs in many archive-flow tests).  Allow
+      // that fast path so the archive tool stays cheap.
+      const updateKeys = Object.keys(updates);
+      if (updateKeys.length === 1 && updateKeys[0] === 'archived') {
+        await this.metabaseClient.request('PUT', `/api/card/${card_id}`, updates);
+        return {
+          content: [{ type: 'text', text: `✅ Card ${card_id} ${updates.archived ? 'archived' : 'unarchived'}` }]
+        };
+      }
+
+      // Bulk-merge update fields onto the existing card via the safe round-trip.
+      const result = await safePutCard(this.metabaseClient, card_id, async (workingCard) => {
+        // Shallow-merge user updates onto the working card.  Special-case
+        // visualization_settings: deep-merge so callers can patch a single
+        // chart key without erasing siblings.
+        for (const [k, v] of Object.entries(updates)) {
+          if (k === 'visualization_settings' && v && typeof v === 'object'
+              && workingCard.visualization_settings && typeof workingCard.visualization_settings === 'object') {
+            workingCard.visualization_settings = { ...workingCard.visualization_settings, ...v };
+          } else {
+            workingCard[k] = v;
+          }
+        }
+      });
+
+      if (!result.ok) {
+        return { content: [{ type: 'text', text:
+          `❌ Card update failed: ${result.error}` +
+          (result.restored === false ? '' : ` (restored=${result.restored})`)
+        }] };
+      }
 
       return {
         content: [{
           type: 'text',
-          text: `✅ Card ${card_id} updated successfully`
-        }]
+          text: `✅ Card ${card_id} updated. Fields changed: ${updateKeys.join(', ')}`
+        }],
+        structuredContent: {
+          id: card_id,
+          updated_fields: updateKeys,
+        },
       };
     } catch (error) {
       return { content: [{ type: 'text', text: `❌ Card update error: ${error.message}` }] };
@@ -1574,47 +1692,60 @@ export class CardsHandler {
     try {
       const questionId = args.question_id;
 
-      // Fetch the current card via API (getQuestion does not exist on the client).
-      const question = await this.metabaseClient.request('GET', `/api/card/${questionId}`);
-
-      // If updating display type and/or settings, apply them now.
-      if (args.display || args.settings) {
-        const updateData = {};
-        if (args.display) updateData.display = args.display;
-        if (args.settings) {
-          // Merge with existing settings so callers can update individual keys.
-          updateData.visualization_settings = {
-            ...(question.visualization_settings || {}),
-            ...args.settings
-          };
-        }
-
-        const updated = await this.metabaseClient.updateQuestion(questionId, updateData);
-
+      // Read-only path: just GET and report current settings.
+      if (!args.display && !args.settings) {
+        const question = await this.metabaseClient.request('GET', `/api/card/${questionId}`);
         return {
           content: [{
             type: 'text',
-            text: `✅ Visualization updated for "${updated.name}" (ID: ${questionId})\n` +
-              `  Display: ${updated.display}\n` +
-              `  Settings applied: ${Object.keys(args.settings || {}).join(', ') || '(display only)'}\n\n` +
-              `Current visualization_settings:\n\`\`\`json\n${JSON.stringify(updated.visualization_settings || {}, null, 2)}\n\`\`\``
-          }]
+            text: `Visualization settings for "${question.name}" (ID: ${questionId})\n` +
+              `  Display: ${question.display}\n\n` +
+              `\`\`\`json\n${JSON.stringify(question.visualization_settings || {}, null, 2)}\n\`\`\``
+          }],
+          structuredContent: {
+            id: question.id,
+            name: question.name,
+            display: question.display,
+            visualization_settings: question.visualization_settings || {}
+          }
         };
       }
 
-      // Read-only: return current settings.
+      // Write path: must use safePutCard to avoid the v0.60 silent-corruption
+      // bug.  PUT /api/card/:id with only {visualization_settings: {...}}
+      // returns 200 but stores empty dataset_query (verified empirically).
+      // safePutCard does GET → mutate → PUT full body → verify-or-restore.
+      const result = await safePutCard(this.metabaseClient, questionId, async (workingCard) => {
+        if (args.display) workingCard.display = args.display;
+        if (args.settings) {
+          workingCard.visualization_settings = {
+            ...(workingCard.visualization_settings || {}),
+            ...args.settings
+          };
+        }
+      });
+
+      if (!result.ok) {
+        return { content: [{ type: 'text', text:
+          `❌ Visualization settings update failed: ${result.error}` +
+          (result.restored === false ? '' : ` (restored=${result.restored})`)
+        }] };
+      }
+
+      const updated = result.card;
       return {
         content: [{
           type: 'text',
-          text: `Visualization settings for "${question.name}" (ID: ${questionId})\n` +
-            `  Display: ${question.display}\n\n` +
-            `\`\`\`json\n${JSON.stringify(question.visualization_settings || {}, null, 2)}\n\`\`\``
+          text: `✅ Visualization updated for "${updated.name}" (ID: ${questionId})\n` +
+            `  Display: ${updated.display}\n` +
+            `  Settings applied: ${Object.keys(args.settings || {}).join(', ') || '(display only)'}\n\n` +
+            `Current visualization_settings:\n\`\`\`json\n${JSON.stringify(updated.visualization_settings || {}, null, 2)}\n\`\`\``
         }],
         structuredContent: {
-          id: question.id,
-          name: question.name,
-          display: question.display,
-          visualization_settings: question.visualization_settings || {}
+          id: updated.id,
+          name: updated.name,
+          display: updated.display,
+          visualization_settings: updated.visualization_settings || {}
         }
       };
 
