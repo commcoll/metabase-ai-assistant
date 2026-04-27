@@ -133,16 +133,18 @@ export async function handleOptimizeDashboardLayout(args, context) {
     const layoutStyle = args.layout_style || 'executive';
     const gridWidth = args.grid_width || 12;
 
-    // Calculate optimized positions using snake_case field names expected by the API.
+    // Calculate optimized positions on a 24-column grid (Metabase v0.60).
+    // Default: two-column layout, each card 12 wide.
+    const colWidth = Math.floor((gridWidth || 24) / 2);
     const optimizedCards = cards.map((card, index) => {
         const row = Math.floor(index / 2) * 4;
-        const col = (index % 2) * 6;
+        const col = (index % 2) * colWidth;
 
         return {
             ...card,
             row,
             col,
-            size_x: 6,
+            size_x: colWidth,
             size_y: 4
         };
     });

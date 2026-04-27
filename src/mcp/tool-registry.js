@@ -648,8 +648,8 @@ export function getToolDefinitions() {
           },
           width: {
             type: 'number',
-            description: 'Dashboard width in grid units (default: 12)',
-            default: 12
+            description: 'Dashboard width in grid units. Metabase v0.60 grid is 24 columns wide.',
+            default: 24
           }
         },
         required: ['name', 'description'],
@@ -766,9 +766,21 @@ export function getToolDefinitions() {
           },
           visualization: {
             type: 'string',
-            description: 'Chart type',
-            enum: ['table', 'bar', 'line', 'area', 'pie', 'number', 'gauge', 'funnel', 'scatter'],
+            description: 'Chart display type',
+            enum: ['table', 'bar', 'line', 'area', 'pie', 'scalar', 'number', 'gauge', 'funnel', 'scatter'],
             default: 'table'
+          },
+          visualization_settings: {
+            type: 'object',
+            description: [
+              'Metabase visualization settings. Set these at creation time to avoid a separate mb_visualization_settings call.',
+              'Line/bar/area charts REQUIRE graph.dimensions (x-axis column name array) and graph.metrics (y-axis column name array) or Metabase will render a blank/error chart.',
+              'Examples:',
+              '  line/bar: {"graph.dimensions": ["week_start"], "graph.metrics": ["net_profit"]}',
+              '  pie:      {"pie.dimension": "category", "pie.metric": "total"}',
+              '  scalar:   {} (no settings needed)',
+              'Column names must exactly match the SQL column aliases.'
+            ].join(' ')
           },
           collection_id: {
             type: 'number',
@@ -808,8 +820,8 @@ export function getToolDefinitions() {
               },
               sizeX: {
                 type: 'number',
-                description: 'Card width in grid units (1-12)',
-                default: 6
+                description: 'Card width in grid units. Metabase v0.60 dashboard grid is 24 columns wide. Full width = 24, half = 12, third = 8.',
+                default: 12
               },
               sizeY: {
                 type: 'number',
@@ -1225,8 +1237,8 @@ export function getToolDefinitions() {
           },
           grid_width: {
             type: 'number',
-            description: 'Dashboard grid width (default: 12)',
-            default: 12
+            description: 'Dashboard grid width in columns. Metabase v0.60 uses a 24-column grid. Full width = 24, half = 12.',
+            default: 24
           },
           preserve_order: {
             type: 'boolean',
@@ -2214,7 +2226,7 @@ export function getToolDefinitions() {
     // === VISUALIZATION SETTINGS ===
     {
       name: 'mb_visualization_settings',
-      description: 'Get or update visualization settings for a question (chart type, colors, labels, etc.)',
+      description: 'Get or update visualization settings for a question. IMPORTANT: line/bar/area charts will show "problem displaying chart" unless graph.dimensions (x-axis column names) and graph.metrics (y-axis column names) are set. Column names must exactly match SQL aliases. Example: settings={"graph.dimensions":["week_start"],"graph.metrics":["net_profit"]}',
       inputSchema: {
         type: 'object',
         properties: {

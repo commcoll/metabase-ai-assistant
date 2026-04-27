@@ -965,37 +965,48 @@ export class CardsHandler {
     try {
       const questionId = args.question_id;
 
-      // Get current question
-      const question = await this.metabaseClient.getQuestion(questionId);
+      // Fetch the current card via API (getQuestion does not exist on the client).
+      const question = await this.metabaseClient.request('GET', `/api/card/${questionId}`);
 
-      // If updating
+      // If updating display type and/or settings, apply them now.
       if (args.display || args.settings) {
         const updateData = {};
         if (args.display) updateData.display = args.display;
-        if (args.settings) updateData.visualization_settings = args.settings;
+        if (args.settings) {
+          // Merge with existing settings so callers can update individual keys.
+          updateData.visualization_settings = {
+            ...(question.visualization_settings || {}),
+            ...args.settings
+          };
+        }
 
         const updated = await this.metabaseClient.updateQuestion(questionId, updateData);
 
         return {
           content: [{
             type: 'text',
-            text: `✅ **Visualization Updated!**\\n\\n` +
-              `🆔 Question ID: ${questionId}\\n` +
-              `📊 Display Type: ${updated.display || args.display}\\n` +
-              `⚙️ Settings Applied: ${Object.keys(args.settings || {}).length} properties`
+            text: `✅ Visualization updated for "${updated.name}" (ID: ${questionId})\n` +
+              `  Display: ${updated.display}\n` +
+              `  Settings applied: ${Object.keys(args.settings || {}).join(', ') || '(display only)'}\n\n` +
+              `Current visualization_settings:\n\`\`\`json\n${JSON.stringify(updated.visualization_settings || {}, null, 2)}\n\`\`\``
           }]
         };
       }
 
-      // Return current settings
+      // Read-only: return current settings.
       return {
         content: [{
           type: 'text',
-          text: `📊 **Visualization Settings: ${question.name}**\\n\\n` +
-            `🆔 Question ID: ${questionId}\\n` +
-            `📈 Display Type: ${question.display}\\n\\n` +
-            `⚙️ **Current Settings:**\\n\`\`\`json\\n${JSON.stringify(question.visualization_settings || {}, null, 2)}\\n\`\`\``
-        }]
+          text: `Visualization settings for "${question.name}" (ID: ${questionId})\n` +
+            `  Display: ${question.display}\n\n` +
+            `\`\`\`json\n${JSON.stringify(question.visualization_settings || {}, null, 2)}\n\`\`\``
+        }],
+        structuredContent: {
+          id: question.id,
+          name: question.name,
+          display: question.display,
+          visualization_settings: question.visualization_settings || {}
+        }
       };
 
     } catch (error) {
@@ -1008,7 +1019,7 @@ export class CardsHandler {
 
   async handleVisualizationRecommend(args) {
     try {
-      const question = await this.metabaseClient.getQuestion(args.question_id);
+      const question = await this.metabaseClient.request('GET', `/api/card/${args.question_id}`);
       const purpose = args.purpose || 'general';
 
       // Analyze the result metadata

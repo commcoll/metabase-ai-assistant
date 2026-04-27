@@ -334,7 +334,8 @@ export class MetabaseClient {
       description: questionData.description,
       dataset_query: nativeQuery,
       display: questionData.visualization || 'table',
-      visualization_settings: {}
+      visualization_settings: questionData.visualization_settings || {},
+      collection_id: questionData.collection_id || null
     };
 
     const response = await this.client.post('/api/card', question);
