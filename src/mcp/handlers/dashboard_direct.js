@@ -74,10 +74,24 @@ export class DashboardDirectHandler {
             applied.push(update.card_id);
         }
 
-        // 4. PUT the full updated dashcards array back.
+        // 4. PUT the updated dashcards array back.
+        // Strip nested card objects — they are read-only in the GET response and
+        // sending them back in a PUT can cause Metabase to reject the payload.
+        const minimalDashcards = dashcards.map(dc => ({
+            id: dc.id,
+            card_id: dc.card_id,
+            row: dc.row,
+            col: dc.col,
+            size_x: dc.size_x,
+            size_y: dc.size_y,
+            series: dc.series || [],
+            parameter_mappings: dc.parameter_mappings || [],
+            visualization_settings: dc.visualization_settings || {}
+        }));
+
         try {
             await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
-                dashcards: dashcards
+                dashcards: minimalDashcards
             });
         } catch (error) {
             throw new McpError(ErrorCode.InternalError, `Failed to PUT dashboard layout: ${error.message}`);
@@ -193,7 +207,7 @@ export class DashboardDirectHandler {
         try {
             dashboard = await this.metabaseClient.request('GET', `/api/dashboard/${dashboard_id}`);
         } catch (error) {
-            throw new McpError(ErrorCode.InternalError, `Failed to fetch dashboard ${dashboard_id}: ${error.message}`);
+            return { content: [{ type: 'text', text: `❌ Failed to fetch dashboard ${dashboard_id}: ${error.message}` }] };
         }
 
         const dashcards = dashboard.dashcards || dashboard.ordered_cards || [];
@@ -205,16 +219,28 @@ export class DashboardDirectHandler {
         if (dashcard_id != null) {
             targetDashcard = dashcards.find(dc => dc.id === dashcard_id);
             if (!targetDashcard) {
-                throw new McpError(ErrorCode.InvalidRequest, `Dashcard ${dashcard_id} not found on dashboard ${dashboard_id}`);
+                return { content: [{ type: 'text', text: `❌ Dashcard ${dashcard_id} not found on dashboard ${dashboard_id}` }] };
             }
         } else {
             targetDashcard = dashcards.find(dc => dc.card_id === card_id);
             if (!targetDashcard) {
-                throw new McpError(ErrorCode.InvalidRequest, `Card ${card_id} not found on dashboard ${dashboard_id}`);
+                return { content: [{ type: 'text', text: `❌ Card ${card_id} not found on dashboard ${dashboard_id}` }] };
             }
         }
 
         // 3. Build the new parameter_mappings array.
+        //
+        // target_type semantics:
+        //   'variable'  — plain SQL template tag (text/number/date variable)
+        //                 target: ["variable", ["template-tag", "tag_name"]]
+        //   'dimension' — field-filter (dimension) SQL template tag
+        //                 target: ["dimension", ["template-tag", "tag_name"]]
+        //   'field'     — MBQL structured question field reference
+        //                 target: ["dimension", ["field", field_id_integer, null]]
+        //
+        // The 'dimension' vs 'field' split is critical: native SQL questions use
+        // template-tag references; MBQL questions use field ID references.
+        const errors = [];
         const mappingArray = mappings.map(m => {
             const mapObj = {
                 "parameter_id": m.parameter_id,
@@ -225,22 +251,26 @@ export class DashboardDirectHandler {
             if (m.target_type === 'variable') {
                 mapObj.target = ["variable", ["template-tag", m.target_value]];
             } else if (m.target_type === 'dimension') {
-                if (Array.isArray(m.target_value)) {
-                    mapObj.target = m.target_value;
-                } else {
-                    // Field IDs must be integers — coerce from string if needed.
-                    const fieldId = parseInt(m.target_value, 10);
-                    if (isNaN(fieldId)) {
-                        throw new McpError(ErrorCode.InvalidParams, `target_value '${m.target_value}' is not a valid field ID integer`);
-                    }
-                    mapObj.target = ["dimension", ["field", fieldId, null]];
+                // Field-filter template tag on a native SQL question.
+                mapObj.target = ["dimension", ["template-tag", m.target_value]];
+            } else if (m.target_type === 'field') {
+                // MBQL field reference (structured / GUI-built questions).
+                const fieldId = parseInt(m.target_value, 10);
+                if (isNaN(fieldId)) {
+                    errors.push(`target_value '${m.target_value}' is not a valid field ID integer for mapping ${m.parameter_id}`);
+                    return null;
                 }
+                mapObj.target = ["dimension", ["field", fieldId, null]];
             } else {
-                logger.warn(`Unknown target_type '${m.target_type}' for mapping ${m.parameter_id} — skipping`);
+                errors.push(`Unknown target_type '${m.target_type}' for mapping ${m.parameter_id}`);
                 return null;
             }
             return mapObj;
         }).filter(m => m !== null);
+
+        if (errors.length > 0 && mappingArray.length === 0) {
+            return { content: [{ type: 'text', text: `❌ All mappings failed validation:\n${errors.join('\n')}` }] };
+        }
 
         // 4. Merge with any existing mappings (replace any that share parameter_id).
         const existingMappings = targetDashcard.parameter_mappings || [];
@@ -249,18 +279,33 @@ export class DashboardDirectHandler {
         targetDashcard.parameter_mappings = [...retained, ...mappingArray];
 
         // 5. PUT the full updated dashcards array back.
+        // Strip the nested card object from each dashcard — it's read-only data from
+        // the GET response and sending it back can cause Metabase to reject the request.
+        const minimalDashcards = dashcards.map(dc => ({
+            id: dc.id,
+            card_id: dc.card_id,
+            row: dc.row,
+            col: dc.col,
+            size_x: dc.size_x,
+            size_y: dc.size_y,
+            series: dc.series || [],
+            parameter_mappings: dc.parameter_mappings || [],
+            visualization_settings: dc.visualization_settings || {}
+        }));
+
         try {
             await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
-                dashcards: dashcards
+                dashcards: minimalDashcards
             });
         } catch (error) {
-            throw new McpError(ErrorCode.InternalError, `Failed to PUT dashboard filter mappings: ${error.message}`);
+            return { content: [{ type: 'text', text: `❌ Failed to PUT dashboard filter mappings: ${error.message}` }] };
         }
 
+        const warnText = errors.length > 0 ? `\n⚠️ Some mappings skipped:\n${errors.join('\n')}` : '';
         return {
             content: [{
                 type: 'text',
-                text: `**Filter Linked**\nDashboard: ${dashboard_id}\nCard: ${card_id}\nMappings Applied: ${mappings.length}`
+                text: `✅ Filter linked\nDashboard: ${dashboard_id}\nCard: ${card_id} (dashcard: ${targetDashcard.id})\nMappings applied: ${mappingArray.length}${warnText}`
             }]
         };
     }

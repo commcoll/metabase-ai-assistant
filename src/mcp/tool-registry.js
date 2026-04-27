@@ -904,12 +904,27 @@ export function getToolDefinitions() {
           dashcard_id: { type: 'number', description: 'Optional: the dashcard\'s own id. Use this when the same question appears on the dashboard more than once to target the correct instance.' },
           mappings: {
             type: 'array',
+            description: 'One entry per dashboard filter→card parameter connection.',
             items: {
               type: 'object',
               properties: {
-                parameter_id: { type: 'string', description: 'The GUID of the dashboard parameter' },
-                target_type: { type: 'string', enum: ['variable', 'dimension'], description: 'variable = native SQL template tag; dimension = MBQL field filter' },
-                target_value: { type: 'string', description: 'For variable: the template-tag name (without {{}}). For dimension: the integer Field ID.' }
+                parameter_id: {
+                  type: 'string',
+                  description: 'The GUID of the dashboard filter parameter (from mb_dashboard_get structuredContent.parameters[].id)'
+                },
+                target_type: {
+                  type: 'string',
+                  enum: ['variable', 'dimension', 'field'],
+                  description: [
+                    'variable   — plain template tag (text/number/date variable in native SQL). target_value = tag name.',
+                    'dimension  — field-filter template tag in native SQL (created with field_id in mb_question_create_parametric). target_value = tag name (NOT the field ID).',
+                    'field      — MBQL/structured question field reference. target_value = integer Field ID.'
+                  ].join(' | ')
+                },
+                target_value: {
+                  type: 'string',
+                  description: 'For variable/dimension: the template-tag name used in SQL (e.g. "date_range"). For field: the integer Field ID as a string.'
+                }
               },
               required: ['parameter_id', 'target_type', 'target_value']
             }
