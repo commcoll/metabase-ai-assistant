@@ -107,10 +107,11 @@ async function safePutCard(metabaseClient, card_id, mutate) {
     return { ok: false, error: `pre-PUT GET returned ${original === null ? 'null' : typeof original}`, restored: false };
   }
 
-  // Snapshot of the original dataset_query — used for both the corruption
-  // check and the restore-on-corruption path.
-  const originalDatasetQueryJson = JSON.stringify(original.dataset_query || null);
+  // Snapshot whether the original had a real dataset_query.  Empty/null cases
+  // (archived stubs, freshly-created shells) are excluded from corruption
+  // checks because there's nothing to lose.
   const originalHadDatasetQuery = !!(original.dataset_query
+    && typeof original.dataset_query === 'object'
     && Object.keys(original.dataset_query).length > 0);
 
   // Make a working copy so mutate() doesn't accidentally affect the snapshot.
@@ -123,35 +124,65 @@ async function safePutCard(metabaseClient, card_id, mutate) {
 
   const putBody = stripReadOnlyCardFields(working);
 
-  let putResponse;
   try {
-    putResponse = await metabaseClient.request('PUT', `/api/card/${card_id}`, putBody);
+    await metabaseClient.request('PUT', `/api/card/${card_id}`, putBody);
   } catch (e) {
     return { ok: false, error: `PUT failed: ${e.message}`, restored: false };
   }
 
-  // Corruption check: did the PUT silently zero the dataset_query?
-  const respDQ = putResponse && putResponse.dataset_query;
-  const respHasDQ = !!(respDQ && Object.keys(respDQ).length > 0);
+  // Corruption check: re-GET the card and compare.  Trusting the PUT response
+  // shape was previously a source of false positives (some Metabase endpoints
+  // return abbreviated bodies on PUT, with dataset_query absent rather than
+  // empty).  An explicit re-GET costs one round-trip but is unambiguous.
+  let postPut;
+  try {
+    postPut = await metabaseClient.request('GET', `/api/card/${card_id}`);
+  } catch (e) {
+    // Treat read-after-write failure as non-fatal — the PUT succeeded; we
+    // just can't verify.  Surface a warning rather than a hard error so the
+    // caller knows the state is uncertain.
+    return {
+      ok: true,
+      card: working,
+      warning: `post-PUT verification GET failed: ${e.message}`,
+    };
+  }
 
-  if (originalHadDatasetQuery && !respHasDQ) {
-    // Silent corruption.  Restore from the snapshot.
+  const postDQ = postPut && postPut.dataset_query;
+  const postHasDQ = !!(postDQ && typeof postDQ === 'object' && Object.keys(postDQ).length > 0);
+
+  if (originalHadDatasetQuery && !postHasDQ) {
+    // Silent corruption confirmed by re-GET.  Try to restore from snapshot.
     let restored = false;
+    let restoreError = null;
     try {
       const restoreBody = stripReadOnlyCardFields(original);
       await metabaseClient.request('PUT', `/api/card/${card_id}`, restoreBody);
-      restored = true;
+
+      // Verify the restore actually worked — don't trust the PUT response.
+      // If the original itself triggered the corruption (shape mismatch),
+      // the restore PUT will fail too and we must not declare success.
+      const verifyAfterRestore = await metabaseClient.request('GET', `/api/card/${card_id}`);
+      const vDQ = verifyAfterRestore && verifyAfterRestore.dataset_query;
+      restored = !!(vDQ && typeof vDQ === 'object' && Object.keys(vDQ).length > 0);
+      if (!restored) {
+        restoreError = 'restore PUT returned 200 but post-restore GET still shows empty dataset_query';
+      }
     } catch (restoreErr) {
-      logger.error(`safePutCard: restore PUT failed for card ${card_id}: ${restoreErr.message}`);
+      restoreError = restoreErr.message;
+      logger.error(`safePutCard: restore PUT failed for card ${card_id}: ${restoreError}`);
     }
+
     return {
       ok: false,
-      error: `Metabase v0.60 silent-corruption detected: PUT returned 200 but dataset_query is empty in the response. ${restored ? 'Card was restored from snapshot.' : 'RESTORE FAILED — card may be in a corrupted state.'}`,
+      error: `Metabase v0.60 silent-corruption detected on PUT (post-PUT GET shows empty dataset_query). ` +
+        (restored ? 'Card was restored from snapshot and verified intact.'
+                  : `RESTORE FAILED (${restoreError || 'unknown'}) — card may still be corrupted.`),
       restored,
     };
   }
 
-  return { ok: true, card: putResponse };
+  return { ok: true, card: postPut };
 }
 
 /**
@@ -251,10 +282,18 @@ function aliasGuidanceForTable(tableName) {
   if (!tableName || typeof tableName !== 'string') return null;
   if (/^[A-Za-z0-9_]+$/.test(tableName)) return null;
 
-  // Suggest a sensible alias: lowercase, replace non-word with underscore,
-  // strip a leading "tab" prefix (ERPnext convention) for cleaner aliases.
-  let suggested = tableName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  if (suggested.startsWith('tab_')) suggested = suggested.slice(4);
+  // Suggest a sensible alias.  Order matters: strip the ERPnext "tab" prefix
+  // BEFORE underscoring, otherwise the underscore inserted between "tab" and
+  // the rest of the name would prevent the prefix from being recognised.
+  // Examples:
+  //   "tabGL Entry"      → "gl_entry"
+  //   "tabSales Invoice" → "sales_invoice"
+  //   "Order Items"      → "order_items"
+  let suggested = tableName;
+  // Strip "tab" prefix when followed by a capital letter (the Frappe convention):
+  // matches "tabGL Entry" but not "tablet_orders".
+  suggested = suggested.replace(/^tab(?=[A-Z])/, '');
+  suggested = suggested.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
 
   return (
     `\n\n⚠️  Table name "${tableName}" contains spaces or special chars.\n` +
@@ -480,13 +519,17 @@ export class CardsHandler {
 
       // Reset applied; the safePutCard mutator will repopulate with real diffs.
       applied.length = 0;
+      // Track tags that existed in the probe but vanished by mutate-time
+      // (TOCTOU between probe GET and mutator GET).  Surfaced separately
+      // from notFound so the user can see whether the tag was missing
+      // from the start vs. raced away mid-call.
+      const vanishedSinceProbe = [];
 
       // safePutCard does GET → mutate → strip → PUT → verify.  The mutator
       // operates on a fresh deep-copy of the card; we re-locate the tags in
-      // that copy and apply each patch in place.  safePutCard then verifies
-      // the response still has a populated dataset_query — if Metabase v0.60
-      // silent-corrupts on the PUT (returns 200 with empty dataset_query),
-      // the snapshot is restored automatically.
+      // that copy and apply each patch in place.  safePutCard then re-GETs
+      // and verifies the dataset_query is still populated — if v0.60 silent-
+      // corrupts on the PUT, the snapshot is restored automatically.
       const result = await safePutCard(this.metabaseClient, card_id, async (workingCard) => {
         const located = locateTemplateTags(workingCard.dataset_query);
         if (!located.tags) {
@@ -495,10 +538,18 @@ export class CardsHandler {
         const tags = located.tags;
 
         for (const patch of patches) {
-          const tag = tags[patch.tag_name];
-          if (!tag) continue; // already counted in notFound
           const patchKeys = Object.keys(patch).filter(k => k !== 'tag_name');
-          if (patchKeys.length === 0) continue; // already counted in noopPatches
+          // Skip cases already accounted for in the probe pass.
+          if (notFound.includes(patch.tag_name)) continue;
+          if (patchKeys.length === 0) continue; // counted in noopPatches
+
+          const tag = tags[patch.tag_name];
+          if (!tag) {
+            // Tag existed at probe time but is gone now.  Don't silently
+            // drop it — surface separately.
+            vanishedSinceProbe.push(patch.tag_name);
+            continue;
+          }
 
           const before = { ...tag };
           if (patch.widget_type !== undefined)  tag['widget-type']   = patch.widget_type;
@@ -506,7 +557,13 @@ export class CardsHandler {
           if (patch.type !== undefined)         tag.type             = patch.type;
           if (patch.default !== undefined)      tag.default          = patch.default;
           if (patch.field_id !== undefined)     tag.dimension        = ['field', patch.field_id, null];
-          if (patch.alias !== undefined)        tag.alias            = patch.alias || undefined;
+          if (patch.alias !== undefined) {
+            // Empty string / null means "remove the alias".  Use delete so
+            // the diff line below reads `before.alias → undefined` cleanly,
+            // and so `JSON.stringify` doesn't emit the key at all.
+            if (patch.alias) tag.alias = patch.alias;
+            else delete tag.alias;
+          }
 
           const changes = patchKeys.map((k) => {
             const storageKey = PATCH_KEY_TO_STORAGE_KEY[k] || k;
@@ -525,18 +582,24 @@ export class CardsHandler {
         }] };
       }
 
+      const warnings = [];
+      if (notFound.length) warnings.push(`Tags not found: ${notFound.join(', ')}`);
+      if (vanishedSinceProbe.length) warnings.push(`Tags removed mid-call (TOCTOU): ${vanishedSinceProbe.join(', ')}`);
+
       return {
         content: [{
           type: 'text',
           text: `✅ Patched template tags on card ${card_id} "${probeCard.name}":\n` +
             applied.join('\n') +
-            (notFound.length ? `\n⚠️  Tags not found (skipped): ${notFound.join(', ')}` : '')
+            (warnings.length ? '\n⚠️  ' + warnings.join('\n⚠️  ') : '') +
+            (result.warning ? `\n⚠️  ${result.warning}` : '')
         }],
         structuredContent: {
           card_id,
           card_name: probeCard.name,
           applied: applied.length,
-          skipped: notFound
+          skipped: notFound,
+          vanished_since_probe: vanishedSinceProbe,
         }
       };
     } catch (error) {
@@ -555,11 +618,18 @@ export class CardsHandler {
       // empirically — see safePutCard for details.  Pattern: GET, merge, PUT,
       // verify-or-restore.
       //
-      // Special case: if the only update is `archived`, the partial PUT is
-      // safe (verified by Metabase devs in many archive-flow tests).  Allow
-      // that fast path so the archive tool stays cheap.
+      // Special case: if the only update is `archived` set to a real boolean,
+      // the partial PUT is safe (verified by Metabase devs in many
+      // archive-flow tests).  Allow that fast path so the archive tool stays
+      // cheap.
+      //
+      // Strict boolean check matters: `{archived: undefined}` would otherwise
+      // fast-path here, JSON.stringify would drop the key, and Metabase
+      // would receive an empty PUT body — triggering the v0.60 silent-
+      // corruption bug we're trying to avoid.  Only true / false are safe.
       const updateKeys = Object.keys(updates);
-      if (updateKeys.length === 1 && updateKeys[0] === 'archived') {
+      if (updateKeys.length === 1 && updateKeys[0] === 'archived'
+          && (updates.archived === true || updates.archived === false)) {
         await this.metabaseClient.request('PUT', `/api/card/${card_id}`, updates);
         return {
           content: [{ type: 'text', text: `✅ Card ${card_id} ${updates.archived ? 'archived' : 'unarchived'}` }]
@@ -568,9 +638,12 @@ export class CardsHandler {
 
       // Bulk-merge update fields onto the existing card via the safe round-trip.
       const result = await safePutCard(this.metabaseClient, card_id, async (workingCard) => {
-        // Shallow-merge user updates onto the working card.  Special-case
-        // visualization_settings: deep-merge so callers can patch a single
-        // chart key without erasing siblings.
+        // Merge user updates onto the working card.  visualization_settings is
+        // shallow-merged into the existing object so callers can patch single
+        // top-level keys (graph.dimensions, graph.metrics) without erasing
+        // siblings.  This is shallow — Metabase's viz_settings keys are flat
+        // dotted strings (e.g. "graph.dimensions"), not nested objects, so
+        // shallow merge is the right semantics.
         for (const [k, v] of Object.entries(updates)) {
           if (k === 'visualization_settings' && v && typeof v === 'object'
               && workingCard.visualization_settings && typeof workingCard.visualization_settings === 'object') {
@@ -1693,7 +1766,11 @@ export class CardsHandler {
       const questionId = args.question_id;
 
       // Read-only path: just GET and report current settings.
-      if (!args.display && !args.settings) {
+      // Strict undefined check — a caller passing `{display: ""}` or
+      // `{settings: null}` is presumed to be attempting a (likely invalid)
+      // write rather than a read, so we should NOT silently fall into the
+      // read branch here.  Only "neither key present at all" reads.
+      if (args.display === undefined && args.settings === undefined) {
         const question = await this.metabaseClient.request('GET', `/api/card/${questionId}`);
         return {
           content: [{
