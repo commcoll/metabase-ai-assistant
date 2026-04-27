@@ -2,6 +2,26 @@ import axios from 'axios';
 import { logger } from '../utils/logger.js';
 import { sanitizeNumber, sanitizeLikePattern } from '../utils/sql-sanitizer.js';
 
+/**
+ * Map a Metabase parameter type to the sectionId Metabase's UI uses to pick
+ * the right filter widget (date picker, location dropdown, etc.).  Without
+ * the right sectionId, Metabase falls back to a plain text input even when
+ * the filter type is date/all-options or similar.
+ *
+ * Source: Metabase's frontend/src/metabase/parameters — sections.ts /
+ * PARAMETER_SECTIONS.  The mapping is by type prefix, not exact match.
+ */
+function sectionIdForFilterType(filterType) {
+  if (!filterType || typeof filterType !== 'string') return 'string';
+  if (filterType.startsWith('date/'))     return 'date';
+  if (filterType.startsWith('number/'))   return 'number';
+  if (filterType === 'id')                return 'id';
+  if (filterType === 'category')          return 'string';
+  if (filterType.startsWith('string/'))   return 'string';
+  if (filterType.startsWith('location/')) return 'location';
+  return 'string';
+}
+
 export class MetabaseClient {
   constructor(config) {
     this.baseURL = config.url;
@@ -770,13 +790,21 @@ export class MetabaseClient {
     const dashboard = await this.client.get(`/api/dashboard/${dashboardId}`);
     const currentFilters = dashboard.data.parameters || [];
 
-    // Create proper Metabase filter format
+    // sectionId controls which section of the filter sidebar the filter
+    // appears in AND which picker UI Metabase renders.  Hardcoding "filters"
+    // (the historical default) gives a plain text input regardless of the
+    // filter's type — which is why dashboard date filters created via the
+    // MCP showed as text boxes instead of date pickers.  Map filter type
+    // to the correct section.
+    //
+    // Source: Metabase's parameters/utils.js — see Section/SECTION_FOR_TYPE.
     const newFilter = {
       id: this.generateFilterId(),
       name: filter.name,
       slug: filter.slug || filter.name.toLowerCase().replace(/\s+/g, '_'),
       type: filter.type,
-      sectionId: "filters"
+      sectionId: sectionIdForFilterType(filter.type),
+      required: !!filter.required,
     };
 
     // Add type-specific properties
