@@ -85,10 +85,27 @@ export class CardsHandler {
   }
 
   async handleCardGet(args) {
+    // Defensive: destructuring undefined throws TypeError BEFORE the try.
+    // MCP normally passes args as {}, but harden anyway so this can never
+    // be the source of a "no error message" failure.
+    if (!args || typeof args !== 'object') {
+      return { content: [{ type: 'text', text: `❌ mb_card_get: missing args object` }] };
+    }
     const { card_id } = args;
+    if (card_id === undefined || card_id === null) {
+      return { content: [{ type: 'text', text: `❌ mb_card_get: card_id is required` }] };
+    }
 
     try {
       const card = await this.metabaseClient.request('GET', `/api/card/${card_id}`);
+
+      // Sanity check the response — Metabase v0.60 has been observed to
+      // sometimes return null/empty bodies on malformed requests rather than
+      // a proper error.  Surface that explicitly instead of crashing on
+      // card.id access below.
+      if (!card || typeof card !== 'object') {
+        return { content: [{ type: 'text', text: `❌ mb_card_get: GET /api/card/${card_id} returned ${card === null ? 'null' : typeof card}` }] };
+      }
 
       // Extract template tags for native SQL cards — critical for diagnosing
       // filter type mismatches (e.g. widget-type: date/range vs date/all-options)

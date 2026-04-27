@@ -174,28 +174,78 @@ class MetabaseMCPServer {
       } catch (error) {
         if (error instanceof McpError) throw error;
 
-        logger.error(`Tool ${name} failed:`, error);
-        let errorMessage = error.message;
+        // Defensive error formatting — must NEVER itself throw.  Earlier
+        // versions called error.message.includes(...) directly, which crashes
+        // when error.message is undefined / not a string.  That secondary
+        // crash escapes with no info, producing the dreaded "Tool execution
+        // failed" with no message that's impossible to debug from.
         let errorCode = ErrorCode.InternalError;
+        let errorMessage;
 
-        if (error.message.includes('authentication failed')) {
-          errorMessage = 'Database authentication failed. Check connection credentials.';
-          errorCode = ErrorCode.InvalidRequest;
-        } else if (error.message.includes('prefix')) {
-          errorMessage = `Security violation: ${error.message}`;
-          errorCode = ErrorCode.InvalidRequest;
-        } else if (error.message.includes('connection')) {
-          errorMessage = 'Database connection failed. Check network and credentials.';
-        } else if (error.message.includes('not found')) {
-          errorMessage = `Resource not found: ${error.message}`;
-          errorCode = ErrorCode.InvalidRequest;
-        } else if (error.message.includes('is not a function')) {
-          errorMessage = `Unexpected API format. Details: ${error.message.substring(0, 100)}`;
-        } else if (error.message.includes('Cannot read properties of undefined')) {
-          errorMessage = `Expected data not found. Details: ${error.message.substring(0, 100)}`;
-        } else if (error.message.includes('timeout') || error.message.includes('ETIMEDOUT')) {
-          errorMessage = `Request timed out. Try a smaller query or use LIMIT.`;
+        try {
+          // Coerce error to a useful string regardless of what was thrown.
+          let rawMsg;
+          if (error && typeof error.message === 'string' && error.message.length > 0) {
+            rawMsg = error.message;
+          } else if (typeof error === 'string') {
+            rawMsg = error;
+          } else if (error && typeof error.toString === 'function') {
+            const s = error.toString();
+            rawMsg = (s && s !== '[object Object]') ? s : JSON.stringify(error);
+          } else {
+            rawMsg = '<thrown value had no message>';
+          }
+
+          // Append stack trace tail when available — keeps the diagnostic
+          // useful when the message itself is generic ("Cannot read property
+          // X of undefined" tells you almost nothing without a stack).
+          const stackTail = (error && typeof error.stack === 'string')
+            ? error.stack.split('\n').slice(1, 4).map(l => l.trim()).join(' ← ')
+            : null;
+
+          // Substring-based remapping for nicer messages on common failure
+          // modes.  All checks use a string we KNOW is a string.
+          const m = rawMsg;
+          if (m.includes('authentication failed')) {
+            errorMessage = 'Database authentication failed. Check connection credentials.';
+            errorCode = ErrorCode.InvalidRequest;
+          } else if (m.includes('prefix')) {
+            errorMessage = `Security violation: ${m}`;
+            errorCode = ErrorCode.InvalidRequest;
+          } else if (m.includes('connection refused') || m.includes('ECONNREFUSED')) {
+            errorMessage = `Cannot reach Metabase: ${m}`;
+          } else if (m.includes('not found') || m.includes('Not found')) {
+            errorMessage = `Resource not found: ${m}`;
+            errorCode = ErrorCode.InvalidRequest;
+          } else if (m.includes('is not a function')) {
+            errorMessage = `Unexpected API format. Details: ${m.substring(0, 200)}` +
+              (stackTail ? ` | stack: ${stackTail}` : '');
+          } else if (m.includes('Cannot read properties of undefined') || m.includes('Cannot read property')) {
+            errorMessage = `Null deref in handler. Details: ${m.substring(0, 200)}` +
+              (stackTail ? ` | stack: ${stackTail}` : '');
+          } else if (m.includes('timeout') || m.includes('ETIMEDOUT')) {
+            errorMessage = `Request timed out: ${m}`;
+          } else {
+            // Default: pass the raw message through, with stack tail if useful.
+            errorMessage = stackTail ? `${m} | stack: ${stackTail}` : m;
+          }
+
+          // Final guard — McpError with empty message renders as "Tool
+          // execution failed" with no info, which is the bug we're fixing.
+          if (!errorMessage || errorMessage.trim().length === 0) {
+            errorMessage = `Tool ${name} threw without a message. Stack: ${stackTail || '(no stack)'}`;
+          }
+        } catch (formatErr) {
+          // The error formatter itself crashed.  Don't lose the user.
+          errorMessage = `Tool ${name} failed and the error formatter ` +
+            `also failed: ${formatErr && formatErr.message ? formatErr.message : 'unknown'}.  ` +
+            `Original error type: ${error && error.constructor ? error.constructor.name : typeof error}`;
         }
+
+        // Always log with the full original error for server-side diagnosis.
+        try {
+          logger.error(`Tool ${name} failed:`, error);
+        } catch { /* logger itself might be the problem; swallow */ }
 
         throw new McpError(errorCode, errorMessage);
       }
