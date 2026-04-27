@@ -117,6 +117,42 @@ function extractTemplateTags(dataset_query) {
   return locateTemplateTags(dataset_query).tags;
 }
 
+/**
+ * Detect table names that will trigger Metabase's MariaDB/MySQL field-filter
+ * SQL-generation bug.  Tables whose names contain spaces or other characters
+ * requiring quoting (anything outside [A-Za-z0-9_]) cause Metabase to emit
+ * malformed identifiers like `tabGL Entry.posting_date` (one backquoted
+ * identifier with a literal dot inside) which MariaDB rejects.
+ *
+ * The fix isn't to avoid these tables — it's to use template-tag.alias on
+ * any field-filter (dimension) parameter bound to one of their columns.
+ *
+ * Returns null if the name is safe, or a guidance string if not.  Callers
+ * append the guidance to their text response so the LLM sees it on first
+ * touch — at table discovery time, before it ever tries to build a card.
+ */
+function aliasGuidanceForTable(tableName) {
+  if (!tableName || typeof tableName !== 'string') return null;
+  if (/^[A-Za-z0-9_]+$/.test(tableName)) return null;
+
+  // Suggest a sensible alias: lowercase, replace non-word with underscore,
+  // strip a leading "tab" prefix (ERPnext convention) for cleaner aliases.
+  let suggested = tableName.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+  if (suggested.startsWith('tab_')) suggested = suggested.slice(4);
+
+  return (
+    `\n\n⚠️  Table name "${tableName}" contains spaces or special chars.\n` +
+    `   Field-filter parameters bound to this table's columns WILL 500 ` +
+    `unless you set a template-tag alias.\n` +
+    `   Recommended workflow when creating native SQL parametric questions ` +
+    `against this table:\n` +
+    `     1. Alias the table in the SQL:  FROM \`${tableName}\` AS ${suggested}\n` +
+    `     2. On the field-filter parameter, set alias: "${suggested}.<column_name>"\n` +
+    `   See parameters[].alias in mb_question_create_parametric, or ` +
+    `patches[].alias in mb_card_patch_template_tags.`
+  );
+}
+
 export class CardsHandler {
   constructor(metabaseClient) {
     this.metabaseClient = metabaseClient;
@@ -1733,6 +1769,7 @@ export class CardsHandler {
         .map(f => `  [${f.id}] ${f.name} (${f.base_type}${f.semantic_type ? ' / ' + f.semantic_type : ''})`)
         .join('\\n');
 
+      const aliasNote = aliasGuidanceForTable(meta.name);
       return {
         content: [{
           type: 'text',
@@ -1743,7 +1780,8 @@ export class CardsHandler {
             `📝 Description: ${meta.description || 'None'}\\n` +
             `👁️ Visibility: ${meta.visibility_type}\\n` +
             `🗃️ Schema: ${meta.schema}\\n` +
-            `📊 Fields (${fields.length}):\\n${fieldLines}`
+            `📊 Fields (${fields.length}):\\n${fieldLines}` +
+            (aliasNote || '')
         }],
         structuredContent: {
           id: meta.id,
@@ -1752,6 +1790,7 @@ export class CardsHandler {
           description: meta.description || null,
           schema: meta.schema,
           visibility_type: meta.visibility_type,
+          requires_alias_for_field_filters: !!aliasNote,
           fields: fields.map(f => ({
             id: f.id,
             name: f.name,
@@ -1782,14 +1821,17 @@ export class CardsHandler {
         .map(f => `  [${f.id}] ${f.name}  (${f.base_type}${f.semantic_type ? ' / ' + f.semantic_type : ''})${f.description ? '  — ' + f.description : ''}`)
         .join('\\n');
 
+      const aliasNote = aliasGuidanceForTable(meta.name);
       return {
         content: [{
           type: 'text',
-          text: `Fields for table "${meta.display_name}" (ID: ${table_id}):\\n\\n${fieldLines}`
+          text: `Fields for table "${meta.display_name}" (ID: ${table_id}):\\n\\n${fieldLines}` +
+            (aliasNote || '')
         }],
         structuredContent: {
           table_id,
           table_name: meta.name,
+          requires_alias_for_field_filters: !!aliasNote,
           fields: fields.map(f => ({
             id: f.id,
             name: f.name,
@@ -1830,6 +1872,7 @@ export class CardsHandler {
         };
       }
 
+      const aliasNote = aliasGuidanceForTable(meta.name);
       return {
         content: [{
           type: 'text',
@@ -1838,7 +1881,8 @@ export class CardsHandler {
             `  Display Name: ${match.display_name}\\n` +
             `  Base Type: ${match.base_type}\\n` +
             `  Semantic Type: ${match.semantic_type || 'None'}\\n` +
-            `  Description: ${match.description || 'None'}`
+            `  Description: ${match.description || 'None'}` +
+            (aliasNote || '')
         }],
         structuredContent: {
           id: match.id,
@@ -1847,7 +1891,8 @@ export class CardsHandler {
           base_type: match.base_type,
           semantic_type: match.semantic_type || null,
           table_id,
-          table_name: meta.name
+          table_name: meta.name,
+          requires_alias_for_field_filters: !!aliasNote
         }
       };
     } catch (error) {

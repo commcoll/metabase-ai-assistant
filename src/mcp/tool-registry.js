@@ -707,7 +707,7 @@ export function getToolDefinitions() {
     },
     {
       name: 'mb_question_create_parametric',
-      description: 'Create a parametric question with filters, variables, and dynamic queries - supports date ranges, dropdowns, and field filters',
+      description: 'Create a parametric question with filters, variables, and dynamic queries — supports date ranges, dropdowns, and field filters. **MariaDB/MySQL gotcha:** if a field-filter parameter (`field_id` set) targets a table whose name has spaces or special chars (ERPnext: `tabGL Entry`, `tabSales Invoice`), Metabase\'s SQL generator emits invalid identifiers and the dashboard query 500s. Workaround: alias the table in your SQL (`FROM \\`tabGL Entry\\` AS gl_entry`) and pass `parameters[].alias = "gl_entry.posting_date"`. The `requires_alias_for_field_filters` flag on table-discovery tools (db_tables, mb_table_metadata, mb_table_fields, mb_field_resolve) tells you when a target table needs this.',
       inputSchema: {
         type: 'object',
         properties: {

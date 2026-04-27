@@ -489,18 +489,41 @@ export class SqlHandler {
     const response = await this.metabaseClient.getDatabaseTables(args.database_id || args);
     const tables = response.tables || response.data || response; // Handle multiple formats
 
+    // Detect tables whose names will trip Metabase's MariaDB/MySQL field-filter
+    // SQL-generation bug (any name with chars outside [A-Za-z0-9_]).  Common in
+    // ERPnext schemas (`tabGL Entry`, `tabSales Invoice`, etc.).  Surface a
+    // banner here so any LLM exploring the schema sees the gotcha BEFORE it
+    // builds a parametric question and hits a 500.
+    const needsAlias = tables.filter(t => t.name && !/^[A-Za-z0-9_]+$/.test(t.name));
+    const aliasBanner = needsAlias.length === 0 ? '' : (
+      `\\n\\n⚠️  ${needsAlias.length} table(s) have names that require a ` +
+      `template-tag alias when used in native-SQL field-filter parameters ` +
+      `(MariaDB/MySQL SQL-generation bug for table names with spaces or ` +
+      `special chars).  Affected: ${needsAlias.slice(0, 6).map(t => `"${t.name}"`).join(', ')}` +
+      (needsAlias.length > 6 ? `, +${needsAlias.length - 6} more` : '') + `.\\n` +
+      `   When creating native parametric questions on these tables, alias ` +
+      `the table in the SQL (FROM \`Name With Space\` AS x) and pass ` +
+      `parameters[].alias = "x.col_name" to mb_question_create_parametric.`
+    );
+
     return {
       content: [
         {
           type: 'text',
           text: `Found ${tables.length} tables:\\n${tables
             .map(table => `- ${table.name} (${table.fields?.length || 0} fields)`)
-            .join('\\n')}`,
+            .join('\\n')}` + aliasBanner,
         },
       ],
       structuredContent: {
         database_id: args.database_id || args,
-        tables: tables.map(t => ({ id: t.id, name: t.name, schema: t.schema || 'public' })),
+        tables: tables.map(t => ({
+          id: t.id,
+          name: t.name,
+          schema: t.schema || 'public',
+          requires_alias_for_field_filters: t.name ? !/^[A-Za-z0-9_]+$/.test(t.name) : false,
+        })),
+        tables_requiring_alias_for_field_filters: needsAlias.length,
       },
     };
   }
