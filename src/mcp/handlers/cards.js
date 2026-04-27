@@ -405,23 +405,29 @@ export class CardsHandler {
           ).join('\n')
         : null;
 
-      return {
-        content: [{
-          type: 'text',
-          text: `Card Details:\n` +
-            `  ID: ${card.id}\n` +
-            `  Name: ${card.name}\n` +
-            `  Description: ${card.description || 'None'}\n` +
-            `  Type: ${card.display}\n` +
-            `  Database: ${card.database_id}\n` +
-            `  Collection: ${card.collection_id || 'Root'}\n` +
-            `  Creator: ${card.creator?.email || 'Unknown'}\n` +
-            `  Created: ${card.created_at}\n` +
-            `  Updated: ${card.updated_at}\n` +
-            `  Archived: ${card.archived}` +
-            (tagSummary ? `\n\nTemplate Tags:\n${tagSummary}` : '')
-        }],
-        structuredContent: {
+      const textContent = `Card Details:\n` +
+        `  ID: ${card.id}\n` +
+        `  Name: ${card.name}\n` +
+        `  Description: ${card.description || 'None'}\n` +
+        `  Type: ${card.display}\n` +
+        `  Database: ${card.database_id}\n` +
+        `  Collection: ${card.collection_id || 'Root'}\n` +
+        `  Creator: ${card.creator?.email || 'Unknown'}\n` +
+        `  Created: ${card.created_at}\n` +
+        `  Updated: ${card.updated_at}\n` +
+        `  Archived: ${card.archived}` +
+        (tagSummary ? `\n\nTemplate Tags:\n${tagSummary}` : '');
+
+      // Build structuredContent defensively.  The MCP SDK serializes the
+      // response via JSON.stringify; if anything in the response is non-
+      // serializable (BigInt, undefined inside a function value, circular ref,
+      // or any future Metabase v0.6x field whose shape we don't anticipate)
+      // the SDK would otherwise produce a generic "Tool execution failed"
+      // with no visible cause.  We pre-serialize to detect that and degrade
+      // gracefully to a text-only response with a diagnostic note.
+      let structuredContent;
+      try {
+        const candidate = {
           id: card.id,
           name: card.name,
           description: card.description || null,
@@ -431,15 +437,54 @@ export class CardsHandler {
           archived: card.archived,
           created_at: card.created_at,
           updated_at: card.updated_at,
-          // Full dataset_query included so callers can inspect and update template tags.
-          // To patch a template tag, modify dataset_query.native.template-tags and pass
-          // the updated dataset_query to mb_card_update.
+          // Full dataset_query included so callers can inspect and update
+          // template tags (modify dataset_query.native["template-tags"] or
+          // dataset_query.stages[i]["template-tags"] depending on shape).
           dataset_query: card.dataset_query || null,
           visualization_settings: card.visualization_settings || {},
-        },
+        };
+        // Round-trip through JSON to verify serializability.  If this throws,
+        // we know the issue and surface it instead of letting the SDK bury it.
+        JSON.parse(JSON.stringify(candidate));
+        structuredContent = candidate;
+      } catch (serErr) {
+        // Try to identify the offending field by serializing each individually.
+        const offenders = [];
+        for (const [k, v] of Object.entries({
+          id: card.id, name: card.name, description: card.description,
+          display: card.display, database_id: card.database_id,
+          collection_id: card.collection_id, archived: card.archived,
+          created_at: card.created_at, updated_at: card.updated_at,
+          dataset_query: card.dataset_query,
+          visualization_settings: card.visualization_settings,
+        })) {
+          try { JSON.stringify(v); } catch (e) { offenders.push(`${k} (${e.message})`); }
+        }
+        return {
+          content: [{
+            type: 'text',
+            text: textContent +
+              `\n\n⚠️  structuredContent omitted: not JSON-serializable.\n` +
+              `  Offending fields: ${offenders.join(', ') || '(unidentified)'}\n` +
+              `  Top-level error: ${serErr.message}`
+          }]
+        };
+      }
+
+      return {
+        content: [{ type: 'text', text: textContent }],
+        structuredContent,
       };
     } catch (error) {
-      return { content: [{ type: 'text', text: `❌ Card get error: ${error.message}` }] };
+      // Defensive: any throw inside the handler is caught here AND surfaced
+      // with stack-tail and request context so the LLM sees what failed.
+      const stackTail = error && typeof error.stack === 'string'
+        ? error.stack.split('\n').slice(1, 4).map(l => l.trim()).join(' ← ')
+        : '(no stack)';
+      return { content: [{ type: 'text', text:
+        `❌ Card get error: ${error && error.message ? error.message : String(error)}\n` +
+        `   stack: ${stackTail}`
+      }] };
     }
   }
 
