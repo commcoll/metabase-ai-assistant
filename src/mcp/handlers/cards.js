@@ -92,6 +92,16 @@ export class CardsHandler {
     try {
       const card = await this.metabaseClient.request('GET', `/api/card/${card_id}`);
 
+      // Extract template tags for native SQL cards — critical for diagnosing
+      // filter type mismatches (e.g. widget-type: date/range vs date/all-options)
+      const templateTags = card.dataset_query?.native?.['template-tags'] || null;
+      const tagSummary = templateTags
+        ? Object.entries(templateTags).map(([k, t]) =>
+            `  tag "${k}": type=${t.type}, widget-type=${t['widget-type'] || '(none)'}` +
+            (t.dimension ? `, dimension=${JSON.stringify(t.dimension)}` : '')
+          ).join('\n')
+        : null;
+
       return {
         content: [{
           type: 'text',
@@ -105,7 +115,8 @@ export class CardsHandler {
             `  Creator: ${card.creator?.email || 'Unknown'}\n` +
             `  Created: ${card.created_at}\n` +
             `  Updated: ${card.updated_at}\n` +
-            `  Archived: ${card.archived}`
+            `  Archived: ${card.archived}` +
+            (tagSummary ? `\n\nTemplate Tags:\n${tagSummary}` : '')
         }],
         structuredContent: {
           id: card.id,
@@ -117,6 +128,11 @@ export class CardsHandler {
           archived: card.archived,
           created_at: card.created_at,
           updated_at: card.updated_at,
+          // Full dataset_query included so callers can inspect and update template tags.
+          // To patch a template tag, modify dataset_query.native.template-tags and pass
+          // the updated dataset_query to mb_card_update.
+          dataset_query: card.dataset_query || null,
+          visualization_settings: card.visualization_settings || {},
         },
       };
     } catch (error) {

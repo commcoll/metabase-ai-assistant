@@ -2958,7 +2958,7 @@ export function getToolDefinitions() {
     // ==================== CARD/QUESTION CRUD ====================
     {
       name: 'mb_card_get',
-      description: 'Get detailed information about a specific card/question',
+      description: 'Get detailed information about a specific card/question, including its full dataset_query (with template-tags for native SQL cards) and visualization_settings. The structuredContent.dataset_query field is the authoritative source for template tag configuration — use it to inspect widget-type, dimension bindings, and filter compatibility. Common use: diagnose 500 errors caused by template tag widget-type mismatch (e.g. widget-type "date/range" receiving a relative date string "past13weeks" → should be "date/all-options").',
       inputSchema: {
         type: 'object',
         properties: {
@@ -2972,7 +2972,7 @@ export function getToolDefinitions() {
     },
     {
       name: 'mb_card_update',
-      description: 'Update an existing card/question',
+      description: 'Update an existing card/question. Accepts any subset of card fields — only the fields you pass are changed. To fix a template tag widget-type mismatch causing 500 errors on dashboard queries: (1) call mb_card_get to get structuredContent.dataset_query, (2) modify the relevant template tag\'s "widget-type" field in dataset_query.native["template-tags"] (change "date/range" → "date/all-options" to accept both relative strings and absolute ranges), (3) call mb_card_update with the full modified dataset_query. The "date/all-options" widget-type is compatible with both relative values (past13weeks) and absolute date ranges.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -2994,6 +2994,10 @@ export function getToolDefinitions() {
           collection_id: {
             type: 'number',
             description: 'Move to collection ID'
+          },
+          dataset_query: {
+            type: 'object',
+            description: 'Full dataset_query object (obtained from mb_card_get). Use this to update template tags. For native SQL, modify dataset_query.native["template-tags"][tagName]["widget-type"] to fix filter type mismatches.'
           }
         },
         required: ['card_id']
