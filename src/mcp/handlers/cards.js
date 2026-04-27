@@ -418,62 +418,70 @@ export class CardsHandler {
         `  Archived: ${card.archived}` +
         (tagSummary ? `\n\nTemplate Tags:\n${tagSummary}` : '');
 
-      // Build structuredContent defensively.  The MCP SDK serializes the
-      // response via JSON.stringify; if anything in the response is non-
-      // serializable (BigInt, undefined inside a function value, circular ref,
-      // or any future Metabase v0.6x field whose shape we don't anticipate)
-      // the SDK would otherwise produce a generic "Tool execution failed"
-      // with no visible cause.  We pre-serialize to detect that and degrade
-      // gracefully to a text-only response with a diagnostic note.
-      let structuredContent;
-      try {
-        const candidate = {
-          id: card.id,
-          name: card.name,
-          description: card.description || null,
-          display: card.display,
-          database_id: card.database_id,
-          collection_id: card.collection_id || null,
-          archived: card.archived,
-          created_at: card.created_at,
-          updated_at: card.updated_at,
-          // Full dataset_query included so callers can inspect and update
-          // template tags (modify dataset_query.native["template-tags"] or
-          // dataset_query.stages[i]["template-tags"] depending on shape).
-          dataset_query: card.dataset_query || null,
-          visualization_settings: card.visualization_settings || {},
-        };
-        // Round-trip through JSON to verify serializability.  If this throws,
-        // we know the issue and surface it instead of letting the SDK bury it.
-        JSON.parse(JSON.stringify(candidate));
-        structuredContent = candidate;
-      } catch (serErr) {
-        // Try to identify the offending field by serializing each individually.
-        const offenders = [];
-        for (const [k, v] of Object.entries({
-          id: card.id, name: card.name, description: card.description,
-          display: card.display, database_id: card.database_id,
-          collection_id: card.collection_id, archived: card.archived,
-          created_at: card.created_at, updated_at: card.updated_at,
-          dataset_query: card.dataset_query,
-          visualization_settings: card.visualization_settings,
-        })) {
-          try { JSON.stringify(v); } catch (e) { offenders.push(`${k} (${e.message})`); }
+      // Build a NORMALIZED structuredContent — flat shape with only the keys
+      // an LLM needs for programmatic follow-up.  We deliberately do NOT send
+      // the raw MLv2 dataset_query or raw visualization_settings, because:
+      //
+      //   1. Metabase v0.60 MLv2 dataset_query has slash-keys ("lib/type",
+      //      "lib/uuid", "mbql.stage/native") that some MCP clients reject
+      //      with a generic "Tool execution failed" — observed against
+      //      Claude Desktop in this fork's testing.
+      //   2. visualization_settings.column_settings can contain keys that are
+      //      JSON-stringified arrays (e.g. '["ref",["field",6406,null]]')
+      //      which trigger similar client-side validator quirks.
+      //   3. The full SQL and template-tag summary are already in the text
+      //      response, so the LLM can read them from there.  structuredContent
+      //      only needs to expose the bits a tool would need to act on.
+      //
+      // For follow-up tools (mb_card_patch_template_tags, etc.), this exposes
+      // the TAG NAMES they operate on plus their key fields.  The full MLv2
+      // blob never crosses the MCP wire from this tool.
+      const tagsSummary = templateTags
+        ? Object.entries(templateTags).map(([name, t]) => ({
+            name,
+            type: t.type,
+            widget_type: t['widget-type'] || null,
+            display_name: t['display-name'] || null,
+            // Extract field_id from the dimension binding regardless of shape
+            // (legacy ["field", id, null] or MLv2 ["field", {opts}, id]).
+            field_id: t.dimension && Array.isArray(t.dimension)
+              ? (typeof t.dimension[2] === 'number' ? t.dimension[2]
+                 : typeof t.dimension[1] === 'number' ? t.dimension[1]
+                 : null)
+              : null,
+            alias: t.alias || null,
+            required: !!t.required,
+            has_default: t.default !== null && t.default !== undefined,
+          }))
+        : [];
+
+      // Extract just the SQL string if this is a native card, regardless of
+      // shape.  Both legacy {native:{query:...}} and MLv2 stages[].native are
+      // checked.
+      let sql = null;
+      const dq = card.dataset_query;
+      if (dq) {
+        if (typeof dq.native === 'object' && typeof dq.native.query === 'string') {
+          sql = dq.native.query;
+        } else if (Array.isArray(dq.stages)) {
+          const native = dq.stages.find(s => s && s['lib/type'] === 'mbql.stage/native');
+          if (native && typeof native.native === 'string') sql = native.native;
         }
-        return {
-          content: [{
-            type: 'text',
-            text: textContent +
-              `\n\n⚠️  structuredContent omitted: not JSON-serializable.\n` +
-              `  Offending fields: ${offenders.join(', ') || '(unidentified)'}\n` +
-              `  Top-level error: ${serErr.message}`
-          }]
-        };
       }
 
-      return {
-        content: [{ type: 'text', text: textContent }],
-        structuredContent,
+      const structuredContent = {
+        id: card.id,
+        name: card.name,
+        description: card.description || null,
+        display: card.display,
+        database_id: card.database_id,
+        collection_id: card.collection_id || null,
+        archived: card.archived,
+        created_at: card.created_at,
+        updated_at: card.updated_at,
+        query_type: card.query_type || (dq ? (dq.type || (Array.isArray(dq.stages) ? 'mlv2' : null)) : null),
+        sql,
+        template_tags: tagsSummary,
       };
     } catch (error) {
       // Defensive: any throw inside the handler is caught here AND surfaced
