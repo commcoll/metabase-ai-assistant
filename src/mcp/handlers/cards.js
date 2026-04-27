@@ -118,6 +118,40 @@ function extractTemplateTags(dataset_query) {
 }
 
 /**
+ * Detect JSON columns on a table.  Metabase samples only the first 500 rows
+ * (nested-field-sample-limit constant in
+ *  src/metabase/driver/common/table_rows_sample.clj) when inferring keys
+ * from JSON columns.  Sparse / rarely-set JSON keys won't appear in the
+ * metadata, so the LLM can't see them — it'll either hallucinate or refuse
+ * to query keys it has no record of.
+ *
+ * Common in ERPnext: Frappe stores per-doctype custom fields as JSON keys
+ * inside `_user_tags`, `_seen`, `_assign`, custom-field columns etc.
+ *
+ * Returns null (no JSON columns) or a guidance string.
+ */
+function jsonColumnGuidance(fields) {
+  if (!Array.isArray(fields)) return null;
+  const jsonFields = fields.filter(f => {
+    const bt = f.base_type || f['base-type'] || '';
+    return /^(type\/|:type\/)JSON\b/i.test(bt) || /JSONObject|jsonb?$/i.test(bt);
+  });
+  if (jsonFields.length === 0) return null;
+
+  const names = jsonFields.map(f => `"${f.name}"`).join(', ');
+  return (
+    `\n\n📦 JSON column(s) detected: ${names}.\n` +
+    `   Metabase samples only the first 500 rows when inferring keys inside ` +
+    `JSON columns.  Sparse / rarely-set keys won't appear in metadata and ` +
+    `won't be queryable through Metabase's normal field references.\n` +
+    `   For ERPnext custom fields and similar dynamic data, do NOT rely on ` +
+    `Metabase's JSON unfolding — extract keys explicitly in SQL using ` +
+    `JSON_EXTRACT(<col>, '$.your_key') AS your_key, exposed as a normal ` +
+    `column in a Metabase Transform / view / parametric question.`
+  );
+}
+
+/**
  * Detect table names that will trigger Metabase's MariaDB/MySQL field-filter
  * SQL-generation bug.  Tables whose names contain spaces or other characters
  * requiring quoting (anything outside [A-Za-z0-9_]) cause Metabase to emit
@@ -1770,6 +1804,7 @@ export class CardsHandler {
         .join('\\n');
 
       const aliasNote = aliasGuidanceForTable(meta.name);
+      const jsonNote = jsonColumnGuidance(fields);
       return {
         content: [{
           type: 'text',
@@ -1781,7 +1816,8 @@ export class CardsHandler {
             `👁️ Visibility: ${meta.visibility_type}\\n` +
             `🗃️ Schema: ${meta.schema}\\n` +
             `📊 Fields (${fields.length}):\\n${fieldLines}` +
-            (aliasNote || '')
+            (aliasNote || '') +
+            (jsonNote || '')
         }],
         structuredContent: {
           id: meta.id,
@@ -1791,6 +1827,7 @@ export class CardsHandler {
           schema: meta.schema,
           visibility_type: meta.visibility_type,
           requires_alias_for_field_filters: !!aliasNote,
+          has_json_columns: !!jsonNote,
           fields: fields.map(f => ({
             id: f.id,
             name: f.name,
@@ -1822,16 +1859,19 @@ export class CardsHandler {
         .join('\\n');
 
       const aliasNote = aliasGuidanceForTable(meta.name);
+      const jsonNote = jsonColumnGuidance(fields);
       return {
         content: [{
           type: 'text',
           text: `Fields for table "${meta.display_name}" (ID: ${table_id}):\\n\\n${fieldLines}` +
-            (aliasNote || '')
+            (aliasNote || '') +
+            (jsonNote || '')
         }],
         structuredContent: {
           table_id,
           table_name: meta.name,
           requires_alias_for_field_filters: !!aliasNote,
+          has_json_columns: !!jsonNote,
           fields: fields.map(f => ({
             id: f.id,
             name: f.name,
