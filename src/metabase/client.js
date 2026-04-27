@@ -88,9 +88,36 @@ export class MetabaseClient {
       const response = await this.client.request(requestConfig);
       return response.data;
     } catch (error) {
-      const errorMsg = error.response?.data?.message || error.message;
-      logger.error(`API Request Failed: ${methodUpper} ${endpoint}`, { error: errorMsg });
-      throw new Error(`Metabase API Error: ${errorMsg}`);
+      // Build a diagnostic error message that surfaces what actually happened.
+      // The previous one-liner ("Metabase API Error: <msg>") often resolved to
+      // axios's generic "Request failed with status code 4xx" when Metabase
+      // returned a non-standard error shape (HTML page, {error: ...}, etc.),
+      // making it impossible to distinguish 401/403/404/500 from the consumer.
+      const status = error.response?.status;
+      const data = error.response?.data;
+
+      let detail;
+      if (data && typeof data === 'object') {
+        // Metabase typically returns {message: ...} or {error: ...} or {detail: ...}.
+        detail = data.message || data.error || data.detail
+          || JSON.stringify(data).slice(0, 200);
+      } else if (typeof data === 'string' && data.length) {
+        // HTML error page (e.g. Cloudflare Access challenge) or plain text.
+        detail = data.slice(0, 200).replace(/\s+/g, ' ').trim();
+      } else if (error.code === 'ECONNABORTED' || /timeout/i.test(error.message || '')) {
+        detail = `request timed out after ${requestConfig.timeout || this.defaultQueryTimeout}ms`;
+      } else if (error.code) {
+        detail = `${error.code}: ${error.message}`;
+      } else {
+        detail = error.message || 'unknown error';
+      }
+
+      const where = `${methodUpper} ${endpoint}`;
+      const tag = status ? `HTTP ${status}` : (error.code || 'no response');
+      const fullMsg = `Metabase API Error: ${tag} ${where} — ${detail}`;
+
+      logger.error('API Request Failed', { where, status, code: error.code, detail });
+      throw new Error(fullMsg);
     }
   }
 
