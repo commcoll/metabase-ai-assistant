@@ -752,8 +752,8 @@ export function getToolDefinitions() {
                 },
                 widget_type: {
                   type: 'string',
-                  enum: ['date/range', 'date/single', 'date/relative', 'date/month-year', 'date/quarter-year', 'string/=', 'string/contains', 'number/=', 'number/between', 'category'],
-                  description: 'Widget type for field-filter parameters (field_id required). Controls which date/string/number picker is shown. Defaults to date/range when omitted on a date field.'
+                  enum: ['date/all-options', 'date/range', 'date/single', 'date/month-year', 'date/quarter-year', 'string/=', 'string/contains', 'number/=', 'number/between', 'category'],
+                  description: 'Widget type for field-filter parameters (field_id required). Controls which picker is shown AND which value formats Metabase will accept at the card level. **For date dimensions, prefer "date/all-options"** — it accepts both absolute date ranges AND relative strings (past13weeks, thismonth, etc.). "date/range" rejects relative strings with a 500 when a dashboard filter default like "past13weeks" is passed in. Defaults to "date/all-options" when omitted (the safe choice for any dimension).'
                 },
                 default_value: {
                   type: 'string',

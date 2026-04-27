@@ -316,7 +316,17 @@ export class MetabaseClient {
           // Metabase requires type:"dimension", a dimension array, and a widget-type.
           tag.type = "dimension";
           tag.dimension = ["field", param.field_id, null];
-          tag["widget-type"] = param.widget_type || param.type || "date/range";
+          // Default widget-type is "date/all-options" — the ONLY widget-type that
+          // accepts BOTH absolute date ranges AND relative strings (past13weeks,
+          // thismonth, etc.).  "date/range" rejects relative strings with a 500
+          // when the dashboard passes a date filter default value.  Caller can
+          // override via param.widget_type.
+          //
+          // We deliberately do NOT fall back to param.type here.  param.type is
+          // the *parameter type* namespace ("date", "text", "number", "category")
+          // which doesn't overlap with widget-type values — earlier code conflated
+          // them, producing tags like widget-type:"date" that crashed Metabase.
+          tag["widget-type"] = param.widget_type || "date/all-options";
         } else {
           // Plain variable substitution (text, number, date, category, etc.)
           tag.type = param.type || "text";
