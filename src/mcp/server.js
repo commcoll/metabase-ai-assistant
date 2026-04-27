@@ -247,6 +247,7 @@ class MetabaseMCPServer {
       case 'mb_question_create_parametric': return await this.cardsHandler.handleCreateParametricQuestion(args);
       case 'mb_card_get': return await this.cardsHandler.handleCardGet(args);
       case 'mb_card_update': return await this.cardsHandler.handleCardUpdate(args);
+      case 'mb_card_patch_template_tags': return await this.cardsHandler.handleCardPatchTemplateTags(args);
       case 'mb_card_delete': return await this.cardsHandler.handleCardDelete(args);
       case 'mb_card_archive': return await this.cardsHandler.handleCardArchive(args);
       case 'mb_card_data': return await this.cardsHandler.handleCardData(args);

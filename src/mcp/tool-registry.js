@@ -176,6 +176,7 @@ const TOOL_METADATA = {
     }
   },
   mb_card_update: { title: 'Update Card', write: true, destructive: false, idempotent: true },
+  mb_card_patch_template_tags: { title: 'Patch Card Template Tags', write: true, destructive: false, idempotent: true },
   mb_card_delete: { title: 'Delete Card', write: true, destructive: true, idempotent: true },
   mb_card_archive: { title: 'Archive Card', write: true, destructive: false, idempotent: true },
   mb_card_data: { title: 'Get Card Data' },
@@ -3001,6 +3002,56 @@ export function getToolDefinitions() {
           }
         },
         required: ['card_id']
+      }
+    },
+    {
+      name: 'mb_card_patch_template_tags',
+      description: 'Safely patch one or more template tags on a native SQL card. Does GET → modify → PUT internally — you only need to specify what to change. Use this to fix the "date/range widget-type receiving past13weeks" 500 error: set widget_type to "date/all-options" on the date filter tag. Also use for rebinding a tag to a different field_id or changing its display name. Works even when mb_card_get is failing (the GET is done internally with full error context). Primary use-case: fix 500 errors on dashboard queries caused by filter type mismatch on cards created with mb_question_create_parametric.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          card_id: {
+            type: 'number',
+            description: 'Card ID to patch'
+          },
+          patches: {
+            type: 'array',
+            description: 'List of template tag patches to apply',
+            items: {
+              type: 'object',
+              properties: {
+                tag_name: {
+                  type: 'string',
+                  description: 'Template tag name (the key in template-tags, e.g. "date_range" or "posting_date")'
+                },
+                widget_type: {
+                  type: 'string',
+                  enum: ['date/single', 'date/range', 'date/relative', 'date/all-options', 'string/=', 'string/contains', 'number/=', 'number/between', 'category'],
+                  description: 'New widget-type. Use "date/all-options" to fix 500 errors when a relative date string (past13weeks) is sent to a card with widget-type date/range.'
+                },
+                display_name: {
+                  type: 'string',
+                  description: 'New display name for the filter widget'
+                },
+                type: {
+                  type: 'string',
+                  enum: ['text', 'number', 'date', 'dimension'],
+                  description: 'Tag type (usually leave unchanged)'
+                },
+                field_id: {
+                  type: 'number',
+                  description: 'Rebind the dimension to a different field ID'
+                },
+                default: {
+                  description: 'New default value for the tag (null to remove)'
+                }
+              },
+              required: ['tag_name']
+            },
+            minItems: 1
+          }
+        },
+        required: ['card_id', 'patches']
       }
     },
     {

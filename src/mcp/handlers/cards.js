@@ -140,6 +140,102 @@ export class CardsHandler {
     }
   }
 
+  /**
+   * Patch one or more template tags on a native SQL card without requiring the
+   * caller to know the full dataset_query structure.
+   *
+   * Does the GET → modify template-tags → PUT internally.
+   * Each entry in `patches` maps a tag name to the fields to change.
+   *
+   * Example: fix the date/range vs date/relative 500 error on three cards:
+   *   patches: [
+   *     { tag_name: "date_range", widget_type: "date/all-options" },
+   *   ]
+   */
+  async handleCardPatchTemplateTags(args) {
+    const { card_id, patches } = args;
+
+    try {
+      const card = await this.metabaseClient.request('GET', `/api/card/${card_id}`);
+      const nativeQuery = card.dataset_query?.native;
+
+      if (!nativeQuery) {
+        return { content: [{ type: 'text', text: `❌ Card ${card_id} is not a native SQL card (no native query found)` }] };
+      }
+
+      const tags = nativeQuery['template-tags'];
+      if (!tags) {
+        return { content: [{ type: 'text', text: `❌ Card ${card_id} has no template tags` }] };
+      }
+
+      const applied = [];
+      const notFound = [];
+
+      for (const patch of patches) {
+        const tag = tags[patch.tag_name];
+        if (!tag) {
+          notFound.push(patch.tag_name);
+          continue;
+        }
+
+        const before = { ...tag };
+
+        if (patch.widget_type !== undefined)  tag['widget-type']   = patch.widget_type;
+        if (patch.display_name !== undefined) tag['display-name']  = patch.display_name;
+        if (patch.type !== undefined)         tag.type             = patch.type;
+        if (patch.default !== undefined)      tag.default          = patch.default;
+        // dimension binding: ["field", field_id, null]
+        if (patch.field_id !== undefined)     tag.dimension        = ['field', patch.field_id, null];
+
+        const changes = Object.entries(patch)
+          .filter(([k]) => k !== 'tag_name')
+          .map(([k, v]) => `${k}: ${JSON.stringify(before[k === 'widget_type' ? 'widget-type' : k === 'display_name' ? 'display-name' : k])} → ${JSON.stringify(v)}`)
+          .join(', ');
+
+        applied.push(`  "${patch.tag_name}": ${changes}`);
+      }
+
+      if (applied.length === 0) {
+        return {
+          content: [{
+            type: 'text',
+            text: `⚠️ No patches applied.\n` +
+              (notFound.length ? `  Tags not found: ${notFound.join(', ')}\n` : '') +
+              `  Available tags: ${Object.keys(tags).join(', ')}`
+          }]
+        };
+      }
+
+      // PUT back the full dataset_query with modified tags
+      const updatedDatasetQuery = {
+        ...card.dataset_query,
+        native: { ...nativeQuery, 'template-tags': tags }
+      };
+
+      await this.metabaseClient.request('PUT', `/api/card/${card_id}`, {
+        dataset_query: updatedDatasetQuery
+      });
+
+      return {
+        content: [{
+          type: 'text',
+          text: `✅ Patched template tags on card ${card_id} "${card.name}":\n` +
+            applied.join('\n') +
+            (notFound.length ? `\n⚠️  Tags not found (skipped): ${notFound.join(', ')}` : '')
+        }],
+        structuredContent: {
+          card_id,
+          card_name: card.name,
+          applied: applied.length,
+          skipped: notFound
+        }
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `❌ Card patch template tags error: ${error.message}` }] };
+    }
+  }
+
+
   async handleCardUpdate(args) {
     const { card_id, ...updates } = args;
 
