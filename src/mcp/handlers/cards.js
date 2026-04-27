@@ -60,32 +60,6 @@ export class CardsHandler {
     };
   }
 
-  async handleCreateParametricQuestion(args) {
-    try {
-      const question = await this.metabaseClient.createParametricQuestion(args);
-
-      let output = `✅ Parametric Question Created Successfully!\\n\\n`;
-      output += `❓ Question: ${question.name} (ID: ${question.id})\\n`;
-      output += `🔗 URL: ${process.env.METABASE_URL}/question/${question.id}\\n`;
-
-      if (args.parameters && args.parameters.length > 0) {
-        output += `\\n🎛️ Parameters:\\n`;
-        args.parameters.forEach(param => {
-          output += `- ${param.display_name} (${param.type})${param.required ? ' *required' : ''}\\n`;
-        });
-      }
-
-      return {
-        content: [{ type: 'text', text: output }],
-      };
-
-    } catch (error) {
-      return {
-        content: [{ type: 'text', text: `❌ Error creating parametric question: ${error.message}` }],
-      };
-    }
-  }
-
   async handleCardGet(args) {
     const { card_id } = args;
 
@@ -511,19 +485,32 @@ export class CardsHandler {
     try {
       const question = await this.metabaseClient.createParametricQuestion(args);
 
-      let output = `✅ Parametric Question Created Successfully!\\n\\n`;
-      output += `❓ Question: ${question.name} (ID: ${question.id})\\n`;
-      output += `🔗 URL: ${process.env.METABASE_URL}/question/${question.id}\\n`;
+      let output = `✅ Parametric Question Created Successfully!\n\n`;
+      output += `• Question: ${question.name} (ID: ${question.id})\n`;
+      output += `• URL: ${process.env.METABASE_URL}/question/${question.id}\n`;
+      output += `• Viz settings applied: ${Object.keys(question.visualization_settings || {}).length > 0 ? 'yes' : 'no (use mb_visualization_settings or mb_dashboard_refresh_viz to apply)'}\n`;
 
       if (args.parameters && args.parameters.length > 0) {
-        output += `\\n🎛️ Parameters:\\n`;
+        output += `\n🎛️ Parameters:\n`;
         args.parameters.forEach(param => {
-          output += `- ${param.display_name} (${param.type})${param.required ? ' *required' : ''}\\n`;
+          output += `  - ${param.display_name} (${param.type || 'text'})` +
+            (param.field_id ? ` [field_id=${param.field_id}]` : '') +
+            (param.widget_type ? ` widget=${param.widget_type}` : '') +
+            (param.required ? ' *required' : '') + `\n`;
         });
       }
 
       return {
         content: [{ type: 'text', text: output }],
+        structuredContent: {
+          id: question.id,
+          name: question.name,
+          url: `${process.env.METABASE_URL}/question/${question.id}`,
+          display: question.display,
+          database_id: question.database_id,
+          collection_id: question.collection_id || null,
+          visualization_settings: question.visualization_settings || {},
+        }
       };
 
     } catch (error) {
