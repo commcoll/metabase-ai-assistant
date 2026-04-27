@@ -329,15 +329,30 @@ export class MetabaseClient {
       }
     }
 
-    // NOTE: do NOT include visualization_settings in the POST body.
-    // Metabase v0.60 triggers a result_metadata recompute (= query execution)
-    // when visualization_settings with graph.dimensions / graph.metrics are
-    // present at card creation time.  The POST call then blocks until the
-    // query finishes, which can take 30–120 s and kills the MCP transport.
+    // NOTE: visualization_settings are intentionally NOT applied at creation time.
     //
-    // Instead: create the card bare, then apply viz settings in a separate
-    // PUT.  A PUT that only changes visualization_settings (no dataset_query
-    // diff) does NOT trigger result_metadata recompute and returns instantly.
+    // Metabase v0.60 triggers a result_metadata recompute (query execution) when
+    // visualization_settings containing graph.dimensions / graph.metrics are
+    // included in the POST body — the POST blocks until the query finishes,
+    // which can take 30–120 s and kills the MCP stdio transport.
+    //
+    // A follow-up PUT /api/card/:id with only {visualization_settings: ...} and
+    // NO dataset_query field clears the stored dataset_query in Metabase v0.60
+    // (PUT treats missing required fields as null, corrupting the card's SQL).
+    //
+    // Safe pattern after creation:
+    //   1. Use mb_visualization_settings to set graph.dimensions / graph.metrics
+    //      on the QUESTION itself (PUT /api/card/:id with the full card body)
+    //   2. Use mb_dashboard_refresh_viz to propagate question viz settings to
+    //      dashcards after the card is added to a dashboard.
+    //
+    // If visualization_settings were passed, they are stored in the returned
+    // object so the caller knows they need to be applied separately.
+    const pendingVizSettings = questionData.visualization_settings &&
+      Object.keys(questionData.visualization_settings).length > 0
+        ? questionData.visualization_settings
+        : null;
+
     const cardBody = {
       name: questionData.name,
       description: questionData.description,
@@ -350,19 +365,9 @@ export class MetabaseClient {
     const response = await this.client.post('/api/card', cardBody);
     const card = response.data;
 
-    // Apply visualization_settings in a separate, lightweight PUT.
-    const vizSettings = questionData.visualization_settings;
-    if (vizSettings && Object.keys(vizSettings).length > 0) {
-      try {
-        await this.request('PUT', `/api/card/${card.id}`, {
-          visualization_settings: vizSettings
-        });
-        card.visualization_settings = vizSettings;
-      } catch (vizErr) {
-        // Non-fatal: card was created.  Log the viz failure and move on so the
-        // caller can still use the card ID and apply settings manually.
-        logger.warn(`createParametricQuestion: card ${card.id} created but viz settings PUT failed: ${vizErr.message}`);
-      }
+    // Surface pending viz settings to the caller without applying them.
+    if (pendingVizSettings) {
+      card._pendingVizSettings = pendingVizSettings;
     }
 
     return card;

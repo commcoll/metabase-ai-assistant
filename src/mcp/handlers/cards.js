@@ -485,19 +485,33 @@ export class CardsHandler {
     try {
       const question = await this.metabaseClient.createParametricQuestion(args);
 
-      let output = `✅ Parametric Question Created Successfully!\n\n`;
-      output += `• Question: ${question.name} (ID: ${question.id})\n`;
+      const hasPendingViz = !!question._pendingVizSettings;
+
+      let output = `✅ Parametric Question Created!\n\n`;
+      output += `• ID: ${question.id}  Name: ${question.name}\n`;
       output += `• URL: ${process.env.METABASE_URL}/question/${question.id}\n`;
-      output += `• Viz settings applied: ${Object.keys(question.visualization_settings || {}).length > 0 ? 'yes' : 'no (use mb_visualization_settings or mb_dashboard_refresh_viz to apply)'}\n`;
 
       if (args.parameters && args.parameters.length > 0) {
         output += `\n🎛️ Parameters:\n`;
         args.parameters.forEach(param => {
           output += `  - ${param.display_name} (${param.type || 'text'})` +
-            (param.field_id ? ` [field_id=${param.field_id}]` : '') +
+            (param.field_id ? ` field_id=${param.field_id}` : '') +
             (param.widget_type ? ` widget=${param.widget_type}` : '') +
             (param.required ? ' *required' : '') + `\n`;
         });
+      }
+
+      if (hasPendingViz) {
+        output += `\n⚠️  Visualization settings were NOT applied at creation time.\n`;
+        output += `   Applying viz settings during card creation causes Metabase to\n`;
+        output += `   execute the query synchronously (result_metadata recompute) which\n`;
+        output += `   can hang the MCP transport on slow queries.\n\n`;
+        output += `   To apply them safely:\n`;
+        output += `   1. Add the card to its dashboard first\n`;
+        output += `   2. Call mb_dashboard_refresh_viz on the dashboard — this propagates\n`;
+        output += `      the pending settings from the question onto the dashcard\n`;
+        output += `   OR call mb_visualization_settings with card_id=${question.id} and\n`;
+        output += `      the settings listed in structuredContent.pending_viz_settings\n`;
       }
 
       return {
@@ -509,7 +523,10 @@ export class CardsHandler {
           display: question.display,
           database_id: question.database_id,
           collection_id: question.collection_id || null,
-          visualization_settings: question.visualization_settings || {},
+          visualization_settings: {},
+          // Pending settings to be applied via mb_visualization_settings AFTER
+          // the card has been executed at least once (or via mb_dashboard_refresh_viz).
+          pending_viz_settings: question._pendingVizSettings || null,
         }
       };
 
