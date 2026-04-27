@@ -215,6 +215,7 @@ const TOOL_METADATA = {
   mb_dashboard_update: { title: 'Update Dashboard', write: true, destructive: false, idempotent: true },
   mb_dashboard_delete: { title: 'Delete Dashboard', write: true, destructive: true, idempotent: true },
   mb_dashboard_card_update: { title: 'Update Dashboard Card', write: true, destructive: false, idempotent: true },
+  mb_dashboard_refresh_viz: { title: 'Refresh Dashcard Viz from Question', write: true, destructive: false, idempotent: true },
   mb_dashboard_card_remove: { title: 'Remove Dashboard Card', write: true, destructive: true, idempotent: true },
   mb_dashboard_copy: { title: 'Copy Dashboard', write: true, destructive: false, idempotent: false },
   mb_dashboard_add_filter: { title: 'Add Dashboard Filter', write: true, destructive: false, idempotent: false },
@@ -3097,7 +3098,30 @@ export function getToolDefinitions() {
     },
     {
       name: 'mb_dashboard_card_update',
-      description: 'Update card position and size on a dashboard',
+      description: 'Update a dashcard\'s position, size, or visualization settings on a dashboard. card_id is the dashcard\'s own integer id (from mb_dashboard_get structuredContent.cards[].dashcard_id), NOT the question card id. Use visualization_settings to fix charts showing "There was a problem displaying this chart" — set graph.dimensions and graph.metrics to the SQL column alias names.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          dashboard_id: { type: 'number', description: 'Dashboard ID' },
+          card_id: {
+            type: 'number',
+            description: 'The dashcard\'s own integer id (dashcard_id from mb_dashboard_get, NOT the question id)'
+          },
+          row: { type: 'number', description: 'New row position (0-based)' },
+          col: { type: 'number', description: 'New column position (0-based, grid is 24 wide)' },
+          size_x: { type: 'number', description: 'Width in grid units (24 = full width, 12 = half)' },
+          size_y: { type: 'number', description: 'Height in grid units' },
+          visualization_settings: {
+            type: 'object',
+            description: 'Dashcard-level visualization settings. Merged with existing settings. Use to fix chart axis errors: {"graph.dimensions": ["col_name"], "graph.metrics": ["col_name"]}. Column names must match SQL aliases exactly.'
+          }
+        },
+        required: ['dashboard_id', 'card_id']
+      }
+    },
+    {
+      name: 'mb_dashboard_refresh_viz',
+      description: 'Copy visualization_settings from each linked question onto its dashcard. Use this when cards were added to a dashboard BEFORE their visualization settings were configured — dashcards created with empty viz settings won\'t automatically update when the question is later edited. Fixes "There was a problem displaying this chart" caused by stale empty dashcard settings.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -3105,16 +3129,13 @@ export function getToolDefinitions() {
             type: 'number',
             description: 'Dashboard ID'
           },
-          card_id: {
-            type: 'number',
-            description: 'Dashboard card ID'
-          },
-          row: { type: 'number', description: 'New row position' },
-          col: { type: 'number', description: 'New column position' },
-          size_x: { type: 'number', description: 'Width in grid units' },
-          size_y: { type: 'number', description: 'Height in grid units' }
+          dashcard_ids: {
+            type: 'array',
+            items: { type: 'number' },
+            description: 'Optional: specific dashcard IDs to refresh (from mb_dashboard_get). Omit to refresh all cards on the dashboard.'
+          }
         },
-        required: ['dashboard_id', 'card_id']
+        required: ['dashboard_id']
       }
     },
     {

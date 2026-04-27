@@ -601,40 +601,138 @@ export class CardsHandler {
 
 
   async handleDashboardCardUpdate(args) {
-    const { dashboard_id, card_id, row, col, size_x, size_y } = args;
+    const { dashboard_id, card_id, row, col, size_x, size_y, visualization_settings } = args;
 
     try {
       // Get current dashboard
       const dashboard = await this.metabaseClient.request('GET', `/api/dashboard/${dashboard_id}`);
       const cards = dashboard.dashcards || dashboard.ordered_cards || [];
 
-      // Find and update the card
+      // card_id here is the dashcard's own integer id (from mb_dashboard_get).
       const cardToUpdate = cards.find(c => c.id === card_id);
       if (!cardToUpdate) {
-        return { content: [{ type: 'text', text: `❌ Card ${card_id} not found on dashboard ${dashboard_id}` }] };
+        return { content: [{ type: 'text', text: `❌ Dashcard ${card_id} not found on dashboard ${dashboard_id}` }] };
       }
 
+      // Build the minimal dashcard payload, applying only the requested updates.
       const updatedCard = {
-        ...cardToUpdate,
-        ...(row !== undefined && { row }),
-        ...(col !== undefined && { col }),
-        ...(size_x !== undefined && { size_x }),
-        ...(size_y !== undefined && { size_y })
+        id: cardToUpdate.id,
+        card_id: cardToUpdate.card_id,
+        row: row !== undefined ? row : cardToUpdate.row,
+        col: col !== undefined ? col : cardToUpdate.col,
+        size_x: size_x !== undefined ? size_x : cardToUpdate.size_x,
+        size_y: size_y !== undefined ? size_y : cardToUpdate.size_y,
+        series: cardToUpdate.series || [],
+        parameter_mappings: cardToUpdate.parameter_mappings || [],
+        // Merge dashcard-level visualization_settings (empty = inherit from question).
+        // Setting specific keys here overrides the question's settings for this dashcard only.
+        visualization_settings: visualization_settings !== undefined
+          ? { ...(cardToUpdate.visualization_settings || {}), ...visualization_settings }
+          : (cardToUpdate.visualization_settings || {})
       };
 
-      // Metabase v0.60+: use PUT /api/dashboard/:id with full dashcards array.
+      // Use minimal format for all other cards too (strip nested card objects).
+      const minimalDashcards = cards.map(c => {
+        if (c.id === card_id) return updatedCard;
+        return {
+          id: c.id,
+          card_id: c.card_id,
+          row: c.row,
+          col: c.col,
+          size_x: c.size_x,
+          size_y: c.size_y,
+          series: c.series || [],
+          parameter_mappings: c.parameter_mappings || [],
+          visualization_settings: c.visualization_settings || {}
+        };
+      });
+
       await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
-        dashcards: cards.map(c => c.id === card_id ? updatedCard : c)
+        dashcards: minimalDashcards
       });
 
       return {
         content: [{
           type: 'text',
-          text: `✅ Dashboard card ${card_id} position/size updated`
+          text: `✅ Dashcard ${card_id} updated on dashboard ${dashboard_id}` +
+            (visualization_settings ? `\n  visualization_settings set: ${Object.keys(visualization_settings).join(', ')}` : '')
         }]
       };
     } catch (error) {
       return { content: [{ type: 'text', text: `❌ Dashboard card update error: ${error.message}` }] };
+    }
+  }
+
+
+  async handleDashboardRefreshViz(args) {
+    // Copy visualization_settings from each linked question onto its dashcard.
+    // Use this when cards were added to a dashboard before their viz settings
+    // were configured — dashcards created with empty settings won't auto-update
+    // when the question is later edited.
+    const { dashboard_id, dashcard_ids } = args;
+
+    try {
+      const dashboard = await this.metabaseClient.request('GET', `/api/dashboard/${dashboard_id}`);
+      const cards = dashboard.dashcards || dashboard.ordered_cards || [];
+
+      const targets = dashcard_ids && dashcard_ids.length > 0
+        ? cards.filter(c => dashcard_ids.includes(c.id))
+        : cards;
+
+      if (targets.length === 0) {
+        return { content: [{ type: 'text', text: `❌ No matching dashcards found` }] };
+      }
+
+      const updated = [];
+      const skipped = [];
+
+      // Fetch each linked question and copy its visualization settings to the dashcard.
+      for (const dc of targets) {
+        if (!dc.card_id) { skipped.push(`dashcard ${dc.id} (no linked question)`); continue; }
+        try {
+          const question = await this.metabaseClient.request('GET', `/api/card/${dc.card_id}`);
+          if (!question.visualization_settings || Object.keys(question.visualization_settings).length === 0) {
+            skipped.push(`dashcard ${dc.id} "${question.name}" (question has no viz settings)`);
+            continue;
+          }
+          dc.visualization_settings = { ...question.visualization_settings };
+          updated.push(`dashcard ${dc.id} "${question.name}"`);
+        } catch (e) {
+          skipped.push(`dashcard ${dc.id} (error: ${e.message})`);
+        }
+      }
+
+      if (updated.length === 0) {
+        return { content: [{ type: 'text', text: `⚠️ Nothing to update.\n${skipped.map(s => '  skipped: ' + s).join('\n')}` }] };
+      }
+
+      // PUT the dashboard with refreshed dashcard settings (minimal format).
+      const minimalDashcards = cards.map(dc => ({
+        id: dc.id,
+        card_id: dc.card_id,
+        row: dc.row,
+        col: dc.col,
+        size_x: dc.size_x,
+        size_y: dc.size_y,
+        series: dc.series || [],
+        parameter_mappings: dc.parameter_mappings || [],
+        visualization_settings: dc.visualization_settings || {}
+      }));
+
+      await this.metabaseClient.request('PUT', `/api/dashboard/${dashboard_id}`, {
+        dashcards: minimalDashcards
+      });
+
+      return {
+        content: [{
+          type: 'text',
+          text: `✅ Refreshed viz settings from question onto ${updated.length} dashcard(s):\n` +
+            updated.map(s => '  ' + s).join('\n') +
+            (skipped.length ? `\n\nSkipped (${skipped.length}):\n` + skipped.map(s => '  ' + s).join('\n') : '')
+        }]
+      };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `❌ Dashboard refresh viz error: ${error.message}` }] };
     }
   }
 
